@@ -1,8 +1,7 @@
 ---
-title: "PREGVAL cohort profile with 6m of lookback"
-author: "Francisco Sanchez-Saez"
-date: "last-modified" 
-editor: source
+title: "covariables"
+output: html_document
+date: "2025-04-25"
 format:
   html:
     toc: true
