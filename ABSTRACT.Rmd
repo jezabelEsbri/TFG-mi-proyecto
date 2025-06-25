@@ -1,0 +1,1068 @@
+---
+title: "ABSTRACT"
+output: html_document
+date: "2025-04-25"
+---
+```{r, include=FALSE}
+# Configurar las opciones globalmente para todo el documento
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+```
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(plotly)
+library(kableExtra)
+library(haven)
+library(reactable)
+library(grid)
+library(gridExtra)
+library(patchwork)
+library(paletteer)
+library(haven)
+library(tidyr)
+library(DT)
+library(crosstalk)
+library(lubridate) 
+library(data.table)
+library(arrow)
+library(scales)
+library(forcats)
+library(stringr)
+library(purrr)
+library(ggrepel)
+library(gt)
+
+c <- c(
+  "#cce7df",  
+  "#93a29e",
+  "#b7ded2",  
+  "#a4c7bd",  
+  "#92b1a8",  
+  "#809b93",
+  "#bfb5b2" ,
+  "#6d857e",  
+  "#5b6f69",  
+  "#495854" ,"#bfb5b2" ,"#cce7df","#92b1a8","#495854" , "#a4c7bd")
+
+
+```
+
+```{r, eval = FALSE}
+
+ruta_base <- "E:/EMBARAZO/PREGVAL/1-DATOS/3-PROCESADOS/07_GAIA/07j_gaia_non_standard/"
+
+# Crear una lista con los nombres de los archivos de cada año (2009-2021)
+archivos <- paste0(ruta_base, "year_pres_fact_rele=", 2009:2021, "/part-0.parquet")
+
+
+
+# load pregnancies-----------------------------------------------------------
+pregnancies_cohort <- readRDS("E:/EMBARAZO/PREGVAL/1-DATOS/3-PROCESADOS/pregnancy_algorithm/pregnancies_cohort_table_6m_lookback.RDS") |> 
+  # obtain pregnancies from 01-07-2009
+  tidylog::filter(fecha_inicio >= ymd("2009-07-01")) |>
+  distinct()
+
+
+gaia_pq <- archivos |>
+  lapply(read_parquet) |>  # Leer cada archivo
+  bind_rows() 
+
+#ver faltantes de atc_cod pero prin_atc_cod tb
+# Define periods
+
+
+# create "embarazos"-------------------------------------------------------
+embarazos <- pregnancies_cohort |> rename(embarazo_id=pregnancy_id) 
+
+# total number of pregnancies
+n_embarazos <- embarazos |> 
+  tidylog::distinct(embarazo_id) |> nrow()
+
+# number of pregnancies reaching second trimester
+n_embarazos_2t <- embarazos |> 
+  tidylog::filter(duration > 97) |> 
+  distinct(embarazo_id) |> nrow()
+
+# number of pregnancies reaching third trimester
+n_embarazos_3t <- embarazos |> 
+  tidylog::filter(duration > 195) |> 
+  distinct(embarazo_id) |> nrow()
+
+# create trimesters
+embarazos_trimestres <- embarazos |> 
+  mutate(
+    # 13wks before
+    fecha_inicio_13s_antes = fecha_inicio %m-% weeks(13),
+    fecha_fin_13s_antes = fecha_inicio %m-% days(1),
+    # first trim
+    fecha_inicio_1t = fecha_inicio,
+    fecha_fin_1t = if_else(
+      fecha_fin >= fecha_inicio %m+% days(97),
+      fecha_inicio %m+% days(97), fecha_fin),
+    # second trim     
+    fecha_inicio_2t = if_else(
+      fecha_fin >= fecha_inicio %m+% days(98),
+      fecha_inicio %m+% days(98), NA_Date_),
+    fecha_fin_2t = if_else(
+      fecha_fin >= fecha_inicio %m+% days(98),
+      pmin(fecha_inicio %m+% days(195), fecha_fin), NA_Date_),
+    # third trim
+    fecha_inicio_3t = if_else(
+      fecha_fin >= fecha_inicio %m+% days(196),
+      fecha_inicio %m+% days(196), NA_Date_),
+    fecha_fin_3t = if_else(
+      fecha_fin >= fecha_inicio %m+% days(196),
+      fecha_fin, NA_Date_),
+    # 13wks after
+    fecha_inicio_13s_despues = fecha_fin %m+% days(1),
+    fecha_fin_13s_despues = fecha_fin %m+% weeks(13)
+  )
+
+
+
+
+
+
+start.time <- Sys.time() 
+gaia_embarazos <- gaia_pq |> #aquí se queda con las recetas de las embarazadas que están dentro de cada embarazo 
+  select(sip, receta_id, atc_cod, prin_act_cod, pres_farma_cod, 
+         estado_receta, tipo_receta, fecha_receta, pres_farma_desc) |> 
+  collect() |> 
+  inner_join(embarazos_trimestres, by = "sip", relationship = "many-to-many") |> 
+  filter(fecha_receta >= fecha_inicio %m-% weeks(13), 
+           fecha_receta <= fecha_fin %m+% weeks(13))
+end.time <- Sys.time()
+time.taken <- round(end.time-start.time,2)
+
+#sacamos el año 
+gaia_embarazos <- gaia_embarazos %>%
+  mutate(año = year(fecha_receta))
+
+#unimos al maestro para tener el ATC_COD bueno
+ruta_archivo <- "E:/VID/V1/1-DATOS/3-PROCESADOS/Masters/maestro_gaia.dta"
+maestro_atc <- read_dta(ruta_archivo)
+
+
+# combinamos los datasets y actualizar la columna atc_cod y prin_act_cod que tb faltan 
+gaia_embarazos_atc <- gaia_embarazos %>%
+  tidylog::left_join(maestro_atc, by = c("año", "pres_farma_cod")) %>%
+  mutate(atc_cod = ifelse(!is.na(atc_cod.y), atc_cod.y, atc_cod.x)) %>%
+  select(-atc_cod.x, -atc_cod.y)%>%
+  mutate(prin_act_cod = ifelse(!is.na(prin_act_cod.y), prin_act_cod.y, prin_act_cod.x)) %>%
+  select(-prin_act_cod.x, -prin_act_cod.y)
+
+
+
+gaia_embarazos_disp <- gaia_embarazos_atc |>
+  filter(tipo_receta != "prescription") |>
+  mutate(periodo_exposicion = case_when(
+    dplyr::between(fecha_receta, fecha_inicio_13s_antes, fecha_fin_13s_antes) ~ 0,
+    dplyr::between(fecha_receta, fecha_inicio_1t, fecha_fin_1t) ~ 1,
+    dplyr::between(fecha_receta, fecha_inicio_2t, fecha_fin_2t) ~ 2,
+    dplyr::between(fecha_receta, fecha_inicio_3t, fecha_fin_3t) ~ 3,
+    dplyr::between(fecha_receta, fecha_inicio_13s_despues, fecha_fin_13s_despues) ~ 4))
+
+write.csv(gaia_embarazos_disp, "E:/VID/V1/2-SCRIPTS/Jezabel/intermedio.csv", row.names = FALSE)
+#gaia_embarazos_disp=read.csv("E:/VID/V1/2-SCRIPTS/Jezabel/intermedio.csv")
+```
+
+ 
+añadimos embarazadas sin farmacia:
+```{r}
+gaia_embarazos_disp=read.csv("E:/VID/V1/2-SCRIPTS/Jezabel/intermedio.csv") #ya tiene filtrado las recetas para los periodos solo y añadidos los atc_cod
+gaia_embarazos_disp= gaia_embarazos_disp%>%
+  filter(!(via_desc == "OTRAS VIAS" & atc_cod != "N02AB"))
+
+
+pregnancies_cohort=pregnancies_cohort%>%rename(embarazo_id=pregnancy_id)
+
+diferencia <- setdiff(pregnancies_cohort$embarazo_id, gaia_embarazos_disp$embarazo_id)
+
+pregnancies_cohort_not_match <- pregnancies_cohort %>%
+  filter(embarazo_id %in% diferencia)
+
+gaia_embarazos_disp$fecha_inicio <- as.POSIXct(gaia_embarazos_disp$fecha_inicio, format = "%Y-%m-%d", tz = "UTC")
+gaia_embarazos_disp$fecha_fin <- as.POSIXct(gaia_embarazos_disp$fecha_fin, format = "%Y-%m-%d", tz = "UTC")
+
+pregnancies_cohort_not_match$duration <- as.difftime(pregnancies_cohort_not_match$duration, units = "days")
+gaia_embarazos_disp$duration <- as.difftime(gaia_embarazos_disp$duration, units = "days")
+
+pregnancies_cohort_not_match$value <- as.character(pregnancies_cohort_not_match$value)
+
+gaia_embarazos_disp$fecha_calculo <- as.Date(gaia_embarazos_disp$fecha_calculo)
+pregnancies_cohort_not_match$fecha_calculo <- as.Date(pregnancies_cohort_not_match$fecha_calculo)
+gaia_embarazos_disp$fecha_nacimiento <- as.Date(gaia_embarazos_disp$fecha_calculo)
+pregnancies_cohort_not_match$fecha_nacimiento <- as.Date(pregnancies_cohort_not_match$fecha_calculo)
+
+gaia_embarazos_disp$exclusion_risk_0 <- as.character(gaia_embarazos_disp$exclusion_risk_0)
+
+gaia_embarazos_comp <- bind_rows(gaia_embarazos_disp, pregnancies_cohort_not_match)
+
+gaia_embarazos_hiper_comp = gaia_embarazos_comp %>% filter(m_hypertension==1)
+write.csv(gaia_embarazos_hiper_comp, "E:/VID/V1/2-SCRIPTS/Jezabel/gaia_embarazos_hiper_comp.csv", row.names = FALSE)
+#guardamos para en el análisis cargar directamente solo embarazos hipertensos
+
+```
+
+## Imputados por tipo
+```{r}
+pregnancies_cohort <- readRDS("E:/EMBARAZO/PREGVAL/1-DATOS/3-PROCESADOS/pregnancy_algorithm/pregnancies_cohort_table_6m_lookback.RDS") |> 
+  # obtain pregnancies from 01-07-2009
+  tidylog::filter(fecha_inicio >= ymd("2009-07-01")) 
+
+table(pregnancies_cohort$imputed, pregnancies_cohort$tipo_fin)
+
+pregnancies_cohort_hiper = pregnancies_cohort %>% filter(m_hypertension==1)
+table(pregnancies_cohort_hiper$imputed, pregnancies_cohort_hiper$tipo_fin)
+```
+Para ver el numero de con almenos 1 prescripción: (no quitamos la prescripcion como arriba):
+```{r}
+gaia_embarazos_presc <- gaia_embarazos_atc |>
+  mutate(periodo_exposicion = case_when(
+    dplyr::between(fecha_receta, fecha_inicio_13s_antes, fecha_fin_13s_antes) ~ 0,
+    dplyr::between(fecha_receta, fecha_inicio_1t, fecha_fin_1t) ~ 1,
+    dplyr::between(fecha_receta, fecha_inicio_2t, fecha_fin_2t) ~ 2,
+    dplyr::between(fecha_receta, fecha_inicio_3t, fecha_fin_3t) ~ 3,
+    dplyr::between(fecha_receta, fecha_inicio_13s_despues, fecha_fin_13s_despues) ~ 4))
+```
+
+
+Para ver almenos 1 presc y disp en periodos 1:3 
+```{r}
+gaia_embarazos_1_3=gaia_embarazos_presc %>% filter(periodo_exposicion%in%1:3)
+gaia_embarazos_1_3=gaia_embarazos_1_3 %>%
+  filter(!(via_desc == "OTRAS VIAS" & atc_cod != "N02AB"))
+```
+```{r}
+prescritos = gaia_embarazos_1_3 %>% filter(tipo_receta == 'prescription'|tipo_receta=='both')
+num_pres = prescritos %>% distinct(embarazo_id)
+num_pres_mujeres = prescritos %>% distinct(sip)
+dispensados = gaia_embarazos_1_3 %>% filter(tipo_receta == 'billing'|tipo_receta=='both')
+num_disp = dispensados %>% distinct(embarazo_id)
+num_disp_mujeres =dispensados %>% distinct(sip)
+```
+
+
+
+## Resumen y comparaciones
+ 
+
+Dentro de las mujeres con HC, comparación de las características basales  entre las tratadas y las no tratadas durante el embarazo.
+
+
+```{r}
+gaia_embarazos_hiper_comp = gaia_embarazos_comp %>% filter(m_hypertension==1)
+num=gaia_embarazos_hiper_comp %>% distinct(embarazo_id)
+
+cat('De los', nrow(pregnancies_cohort),'embarazos,',nrow(num),'son embarazos con hipertensión\n', 
+    sep = " ")
+
+gaia_embarazos_hiper_count= gaia_embarazos_hiper_comp %>% filter(substr(atc_cod, 1, 3) %in% c("C02", "C03", "C07", "C08", "C09")) %>% filter(periodo_exposicion %in% 1:3)
+cat('De los',nrow(num),'embarazos con hipertensión, hay',length(unique(gaia_embarazos_hiper_count$embarazo_id)),'embarazos tratados con antihipertensivos en los periodos 1:3 ')
+```
+
+
+```{r}
+#edad media
+
+media_trat <- gaia_embarazos_hiper_comp %>%
+  filter(substr(atc_cod, 1, 3) %in% c("C02", "C03", "C07", "C08", "C09")) %>% filter(periodo_exposicion %in% 1:3 ) %>%
+  distinct(embarazo_id, .keep_all = TRUE) %>%  # Elimina duplicados de embarazo_id para que no cuenten más de nuna vez
+  summarise(media_edad = mean(age, na.rm = TRUE))
+
+#nos quedamos ocn los embarazos tratados para quitarlos después
+embarazos_tratados <- gaia_embarazos_hiper_comp %>%
+  filter(substr(atc_cod, 1, 3) %in% c("C02", "C03", "C07", "C08", "C09")) %>% filter(periodo_exposicion %in% 1:3 ) %>%
+  distinct(embarazo_id)  # Solo los ID sin duplicar
+
+# Filtrar los embarazos NO tratados
+media_no_trat <- gaia_embarazos_hiper_comp %>%
+  filter(!embarazo_id %in% embarazos_tratados$embarazo_id) %>% 
+  distinct(embarazo_id, .keep_all = TRUE)%>%  
+  summarise(media_edad = mean(age, na.rm = TRUE))
+
+cat('media edad embarazos tratados')
+print(media_trat$media_edad)
+cat('media edad embarazos no tratados')
+print(media_no_trat$media_edad)
+```
+
+```{r}
+gaia_comparison_table <- gaia_embarazos_hiper_comp |>
+  group_by(sip, fecha_inicio) |>
+  mutate(
+    HC_tratada = any(substr(atc_cod, 1, 3) %in% c("C02", "C03", "C07", "C08", "C09") & periodo_exposicion %in% 1:3),  # Identificar si hay tratamiento
+    HC_category = case_when(
+      HC_tratada ~ "HC tratada",
+      TRUE ~ "HC no tratada"
+    )
+  ) |>
+  ungroup() |>  # Desagrupamos para evitar errores en el siguiente agrupamiento
+  group_by(m_diabetes, HC_category) |>
+  summarise(
+    N = n_distinct(paste(embarazo_id)),  # Contar embarazos únicos
+    .groups = "drop"
+  ) |>
+  # Calcular el porcentaje dentro de cada categoría de tratadas/no tratadas
+  group_by(HC_category) |>
+  mutate(
+    Percent = round((N / sum(N)) * 100, 2)
+  ) |>
+  ungroup()
+
+# Transformar la tabla a formato ancho para mejor visualización
+gaia_comparison_table_wide <- gaia_comparison_table |>
+  pivot_wider(
+    names_from = HC_category,
+    values_from = c(N, Percent),
+    names_sep = "_"
+  )
+
+# Agregar los totales generales a la tabla
+gaia_comparison_table_wide <- gaia_comparison_table_wide |>
+  mutate(
+    N_Total = rowSums(across(starts_with("N_"))),  # Sumar todas las columnas que empiezan con "N_"
+    Percent_Total = round((N_Total / sum(N_Total)) * 100, 2)  # Calcular el porcentaje total
+  )
+
+# Ajustar nombres de columnas para evitar problemas
+colnames(gaia_comparison_table_wide) <- make.names(colnames(gaia_comparison_table_wide))
+
+# Crear la tabla con formato GT
+gaia_comparison_table_wide |>  
+  gt() |>
+  fmt_markdown(columns = everything()) |>
+  cols_label(
+    m_diabetes = "DIABETES",
+    N_HC.tratada = "N",
+    Percent_HC.tratada = "Percent",
+    N_HC.no.tratada = "N",
+    Percent_HC.no.tratada = "Percent",
+    N_Total = "N",
+    Percent_Total = "Percent"
+  ) |>
+  tab_spanner(
+    label = "HC tratada",
+    columns = c(N_HC.tratada, Percent_HC.tratada)
+  ) |>
+  tab_spanner(
+    label = "HC no tratada",
+    columns = c(N_HC.no.tratada, Percent_HC.no.tratada)
+  ) |>
+  tab_spanner(
+    label = "Totales generales",
+    columns = c(N_Total, Percent_Total)
+  ) |>
+  fmt_number(
+    drop_trailing_zeros = TRUE,
+    columns = everything()
+  )
+
+
+
+
+
+# EXCLUSION RISK
+
+gaia_embarazos_hiper_exc=gaia_embarazos_hiper_comp%>%filter(exclusion_risk!='no information available')
+
+gaia_comparison_table <- gaia_embarazos_hiper_exc |>
+  group_by(sip, fecha_inicio) |>
+  mutate(
+    HC_tratada = any(substr(atc_cod, 1, 3) %in% c("C02", "C03", "C07", "C08", "C09") & periodo_exposicion %in% 1:3),  # Identificar si hay tratamiento
+    HC_category = case_when(
+      HC_tratada ~ "HC tratada",
+      TRUE ~ "HC no tratada"
+    )
+  ) |>
+  ungroup() |>  # Desagrupamos para evitar errores en el siguiente agrupamiento
+  group_by(exclusion_risk, HC_category) |>
+  summarise(
+    N = n_distinct(paste(embarazo_id)),  # Contar embarazos únicos
+    .groups = "drop"
+  ) |>
+  # Calcular el porcentaje dentro de cada categoría de tratadas/no tratadas
+  group_by(HC_category) |>
+  mutate(
+    Percent = round((N / sum(N)) * 100, 2)
+  ) |>
+  ungroup()
+
+# Transformar la tabla a formato ancho para mejor visualización
+gaia_comparison_table_wide <- gaia_comparison_table |>
+  pivot_wider(
+    names_from = HC_category,
+    values_from = c(N, Percent),
+    names_sep = "_"
+  )
+
+# Agregar los totales generales a la tabla
+gaia_comparison_table_wide1 <- gaia_comparison_table_wide |>
+  mutate(
+    N_Total = rowSums(across(starts_with("N_"))),  # Sumar todas las columnas que empiezan con "N_"
+    Percent_Total = round((N_Total / sum(N_Total)) * 100, 2)  # Calcular el porcentaje total
+  )
+
+# Ajustar nombres de columnas para evitar problemas
+colnames(gaia_comparison_table_wide1) <- make.names(colnames(gaia_comparison_table_wide1))
+
+# Crear la tabla con formato GT
+gaia_comparison_table_wide1 |>  
+  gt() |>
+  fmt_markdown(columns = everything()) |>
+  cols_label(
+    exclusion_risk = "EXCLUSION RISK ",
+    N_HC.tratada = "N",
+    Percent_HC.tratada = "Percent",
+    N_HC.no.tratada = "N",
+    Percent_HC.no.tratada = "Percent",
+    N_Total = "N",
+    Percent_Total = "Percent"
+  ) |>
+  tab_spanner(
+    label = "HC tratada",
+    columns = c(N_HC.tratada, Percent_HC.tratada)
+  ) |>
+  tab_spanner(
+    label = "HC no tratada",
+    columns = c(N_HC.no.tratada, Percent_HC.no.tratada)
+  ) |>
+  tab_spanner(
+    label = "Totales generales",
+    columns = c(N_Total, Percent_Total)
+  ) |>
+  fmt_number(
+    drop_trailing_zeros = TRUE,
+    columns = everything()
+  )
+
+
+
+
+# ALCOHOL
+
+gaia_comparison_table <- gaia_embarazos_hiper_comp |>
+  group_by(sip, fecha_inicio) |>
+  mutate(
+    HC_tratada = any(substr(atc_cod, 1, 3) %in% c("C02", "C03", "C07", "C08", "C09") & periodo_exposicion %in% 1:3),  # Identificar si hay tratamiento
+    HC_category = case_when(
+      HC_tratada ~ "HC tratada",
+      TRUE ~ "HC no tratada"
+    )
+  ) |>
+  ungroup() |>  # Desagrupamos para evitar errores en el siguiente agrupamiento
+  group_by(m_alcohol, HC_category) |>
+  summarise(
+    N = n_distinct(paste(embarazo_id)),  # Contar embarazos únicos
+    .groups = "drop"
+  ) |>
+  # Calcular el porcentaje dentro de cada categoría de tratadas/no tratadas
+  group_by(HC_category) |>
+  mutate(
+    Percent = round((N / sum(N)) * 100, 2)
+  ) |>
+  ungroup()
+
+# Transformar la tabla a formato ancho para mejor visualización
+gaia_comparison_table_wide <- gaia_comparison_table |>
+  pivot_wider(
+    names_from = HC_category,
+    values_from = c(N, Percent),
+    names_sep = "_"
+  )
+
+# Agregar los totales generales a la tabla
+gaia_comparison_table_wide2 <- gaia_comparison_table_wide |>
+  mutate(
+    N_Total = rowSums(across(starts_with("N_"))),  # Sumar todas las columnas que empiezan con "N_"
+    Percent_Total = round((N_Total / sum(N_Total)) * 100, 2)  # Calcular el porcentaje total
+  )
+
+# Ajustar nombres de columnas para evitar problemas
+colnames(gaia_comparison_table_wide2) <- make.names(colnames(gaia_comparison_table_wide2))
+
+# Crear la tabla con formato GT
+gaia_comparison_table_wide2 |>  
+  gt() |>
+  fmt_markdown(columns = everything()) |>
+  cols_label(
+    m_alcohol = "Alcohol",
+    N_HC.tratada = "N",
+    Percent_HC.tratada = "Percent",
+    N_HC.no.tratada = "N",
+    Percent_HC.no.tratada = "Percent",
+    N_Total = "N",
+    Percent_Total = "Percent"
+  ) |>
+  tab_spanner(
+    label = "HC tratada",
+    columns = c(N_HC.tratada, Percent_HC.tratada)
+  ) |>
+  tab_spanner(
+    label = "HC no tratada",
+    columns = c(N_HC.no.tratada, Percent_HC.no.tratada)
+  ) |>
+  tab_spanner(
+    label = "Totales generales",
+    columns = c(N_Total, Percent_Total)
+  ) |>
+  fmt_number(
+    drop_trailing_zeros = TRUE,
+    columns = everything()
+  )
+
+
+
+
+# SMOKING
+
+gaia_comparison_table <- gaia_embarazos_hiper_comp |>
+  group_by(sip, fecha_inicio) |>
+  mutate(
+    HC_tratada = any(substr(atc_cod, 1, 3) %in% c("C02", "C03", "C07", "C08", "C09") & periodo_exposicion %in% 1:3),  # Identificar si hay tratamiento
+    HC_category = case_when(
+      HC_tratada ~ "HC tratada",
+      TRUE ~ "HC no tratada"
+    )
+  ) |>
+  ungroup() |>  # Desagrupamos para evitar errores en el siguiente agrupamiento
+  group_by(m_smoking, HC_category) |>
+  summarise(
+    N = n_distinct(paste(embarazo_id)),  # Contar embarazos únicos
+    .groups = "drop"
+  ) |>
+  # Calcular el porcentaje dentro de cada categoría de tratadas/no tratadas
+  group_by(HC_category) |>
+  mutate(
+    Percent = round((N / sum(N)) * 100, 2)
+  ) |>
+  ungroup()
+
+# Transformar la tabla a formato ancho para mejor visualización
+gaia_comparison_table_wide <- gaia_comparison_table |>
+  pivot_wider(
+    names_from = HC_category,
+    values_from = c(N, Percent),
+    names_sep = "_"
+  )
+
+# Agregar los totales generales a la tabla
+gaia_comparison_table_wide3 <- gaia_comparison_table_wide |>
+  mutate(
+    N_Total = rowSums(across(starts_with("N_"))),  # Sumar todas las columnas que empiezan con "N_"
+    Percent_Total = round((N_Total / sum(N_Total)) * 100, 2)  # Calcular el porcentaje total
+  )
+
+# Ajustar nombres de columnas para evitar problemas
+colnames(gaia_comparison_table_wide3) <- make.names(colnames(gaia_comparison_table_wide3))
+
+# Crear la tabla con formato GT
+gaia_comparison_table_wide3 |>  
+  gt() |>
+  fmt_markdown(columns = everything()) |>
+  cols_label(
+    m_smoking = "SMOKING",
+    N_HC.tratada = "N",
+    Percent_HC.tratada = "Percent",
+    N_HC.no.tratada = "N",
+    Percent_HC.no.tratada = "Percent",
+    N_Total = "N",
+    Percent_Total = "Percent"
+  ) |>
+  tab_spanner(
+    label = "HC tratada",
+    columns = c(N_HC.tratada, Percent_HC.tratada)
+  ) |>
+  tab_spanner(
+    label = "HC no tratada",
+    columns = c(N_HC.no.tratada, Percent_HC.no.tratada)
+  ) |>
+  tab_spanner(
+    label = "Totales generales",
+    columns = c(N_Total, Percent_Total)
+  ) |>
+  fmt_number(
+    drop_trailing_zeros = TRUE,
+    columns = everything()
+  )
+
+
+
+# m_obesity
+
+gaia_comparison_table <- gaia_embarazos_hiper_comp |>
+  group_by(sip, fecha_inicio) |>
+  mutate(
+    HC_tratada = any(substr(atc_cod, 1, 3) %in% c("C02", "C03", "C07", "C08", "C09") & periodo_exposicion %in% 1:3),  # Identificar si hay tratamiento
+    HC_category = case_when(
+      HC_tratada ~ "HC tratada",
+      TRUE ~ "HC no tratada"
+    )
+  ) |>
+  ungroup() |>  # Desagrupamos para evitar errores en el siguiente agrupamiento
+  group_by(m_obesity, HC_category) |>
+  summarise(
+    N = n_distinct(paste(embarazo_id)),  # Contar embarazos únicos
+    .groups = "drop"
+  ) |>
+  # Calcular el porcentaje dentro de cada categoría de tratadas/no tratadas
+  group_by(HC_category) |>
+  mutate(
+    Percent = round((N / sum(N)) * 100, 2)
+  ) |>
+  ungroup()
+
+# Transformar la tabla a formato ancho para mejor visualización
+gaia_comparison_table_wide <- gaia_comparison_table |>
+  pivot_wider(
+    names_from = HC_category,
+    values_from = c(N, Percent),
+    names_sep = "_"
+  )
+
+# Agregar los totales generales a la tabla
+gaia_comparison_table_wide4 <- gaia_comparison_table_wide |>
+  mutate(
+    N_Total = rowSums(across(starts_with("N_"))),  # Sumar todas las columnas que empiezan con "N_"
+    Percent_Total = round((N_Total / sum(N_Total)) * 100, 2)  # Calcular el porcentaje total
+  )
+
+# Ajustar nombres de columnas para evitar problemas
+colnames(gaia_comparison_table_wide4) <- make.names(colnames(gaia_comparison_table_wide4))
+
+# Crear la tabla con formato GT
+gaia_comparison_table_wide4 |>  
+  gt() |>
+  fmt_markdown(columns = everything()) |>
+  cols_label(
+    m_obesity = "OBESITY",
+    N_HC.tratada = "N",
+    Percent_HC.tratada = "Percent",
+    N_HC.no.tratada = "N",
+    Percent_HC.no.tratada = "Percent",
+    N_Total = "N",
+    Percent_Total = "Percent"
+  ) |>
+  tab_spanner(
+    label = "HC tratada",
+    columns = c(N_HC.tratada, Percent_HC.tratada)
+  ) |>
+  tab_spanner(
+    label = "HC no tratada",
+    columns = c(N_HC.no.tratada, Percent_HC.no.tratada)
+  ) |>
+  tab_spanner(
+    label = "Totales generales",
+    columns = c(N_Total, Percent_Total)
+  ) |>
+  fmt_number(
+    drop_trailing_zeros = TRUE,
+    columns = everything()
+  )
+
+```
+# USO ANTIHIPERTENSIVOS 
+
+```{r}
+pregnancies_cohort <- readRDS("E:/EMBARAZO/PREGVAL/1-DATOS/3-PROCESADOS/pregnancy_algorithm/pregnancies_cohort_table_6m_lookback.RDS") |> 
+  # obtain pregnancies from 01-07-2009
+  tidylog::filter(fecha_inicio >= ymd("2009-07-01")) |>
+  select(sip, fecha_inicio, fecha_fin,year,
+                                          duration, pregnancy_id, tipo_fin,m_hypertension,exclusion_risk,age,m_alcohol,m_obesity,m_diabetes,m_smoking
+  ) |>
+  distinct()
+
+
+
+#ver faltantes de atc_cod pero prin_atc_cod tb
+# Define periods
+
+
+# create "embarazos"-------------------------------------------------------
+embarazos <- pregnancies_cohort |> rename(embarazo_id=pregnancy_id) 
+
+# total number of pregnancies
+n_embarazos <- embarazos |> 
+  tidylog::distinct(embarazo_id) |> nrow()
+
+# number of pregnancies reaching second trimester
+n_embarazos_2t <- embarazos |> 
+  tidylog::filter(duration > 97) |> 
+  distinct(embarazo_id) |> nrow()
+
+# number of pregnancies reaching third trimester
+n_embarazos_3t <- embarazos |> 
+  tidylog::filter(duration > 195) |> 
+  distinct(embarazo_id) |> nrow()
+
+# create trimesters
+embarazos_trimestres <- embarazos |> 
+  mutate(
+    # 13wks before
+    fecha_inicio_13s_antes = fecha_inicio %m-% weeks(13),
+    fecha_fin_13s_antes = fecha_inicio %m-% days(1),
+    # first trim
+    fecha_inicio_1t = fecha_inicio,
+    fecha_fin_1t = if_else(
+      fecha_fin >= fecha_inicio %m+% days(97),
+      fecha_inicio %m+% days(97), fecha_fin),
+    # second trim     
+    fecha_inicio_2t = if_else(
+      fecha_fin >= fecha_inicio %m+% days(98),
+      fecha_inicio %m+% days(98), NA_Date_),
+    fecha_fin_2t = if_else(
+      fecha_fin >= fecha_inicio %m+% days(98),
+      pmin(fecha_inicio %m+% days(195), fecha_fin), NA_Date_),
+    # third trim
+    fecha_inicio_3t = if_else(
+      fecha_fin >= fecha_inicio %m+% days(196),
+      fecha_inicio %m+% days(196), NA_Date_),
+    fecha_fin_3t = if_else(
+      fecha_fin >= fecha_inicio %m+% days(196),
+      fecha_fin, NA_Date_),
+    # 13wks after
+    fecha_inicio_13s_despues = fecha_fin %m+% days(1),
+    fecha_fin_13s_despues = fecha_fin %m+% weeks(13)
+  )
+
+
+
+
+#AQUÍ FILTRAMOS PARA HIPERTENSAS
+pregnancies_cohort_hiper = embarazos_trimestres %>% filter(m_hypertension==1) %>% filter(age>12 & age <55)
+
+#no hace falta q añadamos las no traada s proq es para le gráfico del uso
+#se pierden 523 embarazos hipertensos sin farmacia DENTRO DEL PERIODO 
+gaia_embarazos_hiper <- pregnancies_cohort_hiper |>
+  tidylog::inner_join(gaia_embarazos_disp, by = 'embarazo_id') |> #si unimos por sip no cruzan 311
+  mutate(prin_act_cod = if_else(is.na(prin_act_cod), "Untreated", prin_act_cod)) |>
+  mutate(sip=sip.x) |>
+  mutate(fecha_inicio=fecha_inicio.x)
+```
+
+## Porcentaje de uso de ATC (antihipertensivos) en los distintos periodos 
+
+Describir el porcentaje de uso por ATC durante el embarazo y para el periodo pre-concepcional.
+```{r}
+atc_grupos=c("C02", "C03", "C07", "C08", "C09A",'C09B','C09C','C09D','C09X')
+
+#C09A C09B  ACEI 
+#C09C C09D : ARBS  #C09X : otros renina_angiotensina  
+tabla_resultados <- gaia_embarazos_hiper %>%
+  mutate(grupo = case_when(
+    substr(atc_cod, 1, 3) %in% c("C02", "C03", "C07", "C08") ~ substr(atc_cod, 1, 3),
+    substr(atc_cod, 1, 4) %in% c("C09A", "C09B") ~ "C09AB",  # Agrupar C09A y C09B
+    substr(atc_cod, 1, 4) %in% c("C09C", "C09D") ~ "C09CD",  # Agrupar C09C y C09D
+    substr(atc_cod, 1, 4) == "C09X" ~ "C09X",  # C09X se mantiene separado
+    TRUE ~ NA_character_  # Si no coincide, se asigna NA
+  )) %>%
+  filter(!is.na(grupo)) %>%
+  group_by(grupo, periodo_exposicion) %>%
+  summarise(total_sips = n_distinct(embarazo_id), .groups = "drop") %>%
+  group_by(periodo_exposicion) %>%
+  mutate(porcentaje = total_sips / sum(total_sips) * 100) %>%
+  ungroup()
+
+
+totales <- gaia_embarazos_hiper %>%
+  filter(substr(atc_cod, 1, 3) %in% c("C02", "C03", "C07", "C08", "C09")) %>%
+  group_by(periodo_exposicion) %>%
+  summarise(total_sips = n_distinct(embarazo_id), .groups = "drop") %>%
+  mutate(grupo = "TOTAL")
+
+tabla_con_totales <- bind_rows(tabla_resultados, totales)
+
+# Transformar al formato ancho y mejorar nombres de columnas
+# Transformar al formato ancho, incluyendo períodos adicionales (2, 3 y 4) y actualizar columnas
+tabla_final <- tabla_con_totales %>%
+  pivot_wider(
+    names_from = periodo_exposicion,
+    values_from = c(total_sips, porcentaje),
+    values_fill = list(total_sips = 0, porcentaje = 0)
+  ) %>%
+  # Crear formato N(%) para cada columna
+  mutate(across(starts_with("total_sips_"),
+                ~paste0(.x, " (", format(round(get(sub("total_sips_", "porcentaje_", cur_column())), 1), nsmall = 1), "%)"))) %>%
+  select(-starts_with("porcentaje_")) %>% # Eliminar columnas intermedias de porcentaje
+  # Renombrar columnas con nombres más amigables y claros
+  rename_with(~sub("total_sips_", "embarazadas_periodo_", .), starts_with("total_sips"))
+
+library(gt)
+
+tabla_final %>%
+  gt() %>%
+  fmt_markdown(columns = everything()) %>%
+  cols_label(
+    grupo = "Grupo",
+    embarazadas_periodo_0 = "Periodo 0 (N(%))",
+    embarazadas_periodo_1 = "Periodo 1 (N(%))",
+    embarazadas_periodo_2 = "Periodo 2 (N(%))",
+    embarazadas_periodo_3 = "Periodo 3 (N(%))",
+    embarazadas_periodo_4 = "Periodo 4 (N(%))"
+  ) %>%
+  tab_options(
+    table.font.size = px(12),
+    table.border.top.color = "#9473d8",
+    heading.align = "center"
+  ) %>%
+  tab_style(
+    style = cell_fill(color = "#cce7df"),
+    locations = cells_body()
+  )
+
+#total = número de embarazadas únicas dentro de ese periodo, con antihipertensivos 
+#aquí el porcentaje si que es por periodos solo para los antihipertensivos
+#número de embarazadas únicas que toman ese antihipertensivo (% respecto al total de antihipertensivos dispensados en ese periodo)
+```
+
+En la tabla de arriba los porcentajes para cada grupo son sobre todas las dispensaciones para ese periodo (por ejemplo para C02 periodo 1 : 1902/n() dispensaciones de AH en ese periodo), en el siguiente gráfico el % es sobre los embarazos de ese periodo ( 1902/3211*100)
+```{r,fig.width=13}
+totales <- gaia_embarazos_hiper %>%
+  filter(substr(atc_cod, 1, 3) %in% c("C02", "C03", "C07", "C08", "C09")) %>%
+  group_by(periodo_exposicion) %>%
+  summarise(total_embarazos = n_distinct(embarazo_id), .groups = "drop") %>%
+  mutate(grupo = "TOTAL")
+
+tabla_resultados <- gaia_embarazos_hiper %>%
+  mutate(grupo = case_when(
+    substr(atc_cod, 1, 3) %in% c("C02", "C03", "C07", "C08") ~ substr(atc_cod, 1, 3),
+    substr(atc_cod, 1, 4) %in% c("C09A", "C09B") ~ "C09AB",  # Agrupar C09A y C09B
+    substr(atc_cod, 1, 4) %in% c("C09C", "C09D") ~ "C09CD",  # Agrupar C09C y C09D
+    substr(atc_cod, 1, 4) == "C09X" ~ "C09X",  # C09X se mantiene separado
+    TRUE ~ NA_character_  # Si no coincide, se asigna NA
+  )) %>%
+  filter(!is.na(grupo)) %>%
+  group_by(grupo, periodo_exposicion) %>%
+  summarise(total_sips = n_distinct(embarazo_id), .groups = "drop") %>%
+  group_by(periodo_exposicion) %>%
+  left_join(totales, by='periodo_exposicion')%>%
+  mutate(porcentaje = total_sips / total_embarazos * 100) %>%
+  ungroup()%>% mutate(grupo=grupo.x)
+
+tabla_resultados <- tabla_resultados %>%
+  mutate(Grupo = case_when(
+    grupo == "C02" ~ "Antihipertensivos",
+    grupo == "C03" ~ "Diuréticos",
+    grupo == "C07" ~ "Betabloqueantes",
+    grupo == "C08" ~ "Bloqueadores de canales de calcio",
+    grupo == "C09AB" ~ "IECA",
+    grupo == "C09CD" ~ "ARA II",
+    grupo == "C09X" ~ "Otros antihipertensivos",
+    TRUE ~ grupo  # Mantiene los valores originales si no coinciden
+  ))
+# Graficar los porcentajes con ggplot2
+ggplot(tabla_resultados, aes(x = factor(periodo_exposicion), y = porcentaje, color = Grupo, group = Grupo)) +
+  geom_line(size=1.1) +  # Línea para cada grupo
+  geom_point() +  # Puntos en cada periodo
+  labs(title = "",
+       x = "Periodo de exposición",
+       y = "Embarazos(%)") +
+  theme_minimal() +
+  theme(axis.title.x = element_text(size = 18),   # Tamaño del título del eje x
+        axis.title.y = element_text(size = 18),
+        axis.text.x = element_text(size = 12),    # Tamaño de las etiquetas del eje x
+        legend.title = element_text(size = 16),   # Tamaño del título de la leyenda
+        legend.text = element_text(size = 15)) +  # Tamaño de los textos de la leyenda
+  scale_x_discrete(labels = c("0" = "pre", "1" = "T1", "2" = "T2", "3" = "T3", "4" = "post"))
+```
+
+
+## TOP antihipertensivos MÁS USADOS POR PERIODO en embarazos con HC
+
+```{r}
+#Calculate total n per trimestre  para las embarazadas con hipertension
+n_trim <- pregnancies_cohort_hiper |>
+  summarize(grupo_trim0=sum(!is.na(fecha_inicio_13s_antes)),
+            grupo_trim1=sum(!is.na(fecha_inicio_1t)),
+            grupo_trim2=sum(!is.na(fecha_inicio_2t)),
+            grupo_trim3=sum(!is.na(fecha_inicio_3t)),
+            grupo_trim4=sum(!is.na(fecha_inicio_13s_despues)))
+
+n_trim <- data.frame(n_trim=c(t(n_trim)), periodo_exposicion=0:4)
+
+cohort_disp <- gaia_embarazos_hiper %>% filter(periodo_exposicion %in% 1:3) |>
+  group_by(atc_cod, prin_act_cod) |>  # Agrupar por los criterios necesarios (comprobar porq no agruapr por pres_farma_cod tb)
+  summarize(
+    value = n_distinct(embarazo_id),  # Contar identificadores únicos (cuantas mujeres para cada grupo de atc_cod en cada periodo de exposición)
+    .groups = "drop"
+  ) |>
+  mutate(rate = round(value / 10127 * 100, 2)) |>  # Calcular el porcentaje por periodo (n_distinc(embarazos atc)/n(embarazos en ese trimestre))
+  ungroup() |> 
+  arrange( desc(rate))  # Ordenar primero por periodo, luego por % descendente
+#número de grupos, no de embarazadas
+
+
+
+#nos quedamos solo con los antihipertensivos
+atc_grupos=c("C02", "C03", "C07", "C08", 'C09')
+cohort_disp_atc =cohort_disp%>% filter(substr(atc_cod,1,3) %in% atc_grupos )
+
+```
+
+
+
+
+### para los periodos 1:3
+```{r}
+filtered_data <- cohort_disp_atc |>
+  arrange(desc(value)) 
+
+filtered_data <- merge(filtered_data, 
+                       maestro_atc[, c("atc_cod", "prin_act_cod", "prin_act_desc")], 
+                       by = c("atc_cod", "prin_act_cod"), 
+                       all.x = TRUE)
+filtered_data <- filtered_data[!duplicated(filtered_data[c("atc_cod", "prin_act_cod")], fromLast = TRUE), ]
+filtered_data =filtered_data %>% arrange(desc(value))
+kable((filtered_data |> arrange(desc(value))), format = "markdown", col.names = c("atc_cod", "prin_act_cod", "Valor",'rate','prin_act_desc' ))
+
+#aquí el valor son embarazos dentro de cada grupo de (periodo, atc_cod y prin_act_cod)
+#el porcentaje  = número de embarazos que toman ese ATC en cualquier periodo (1:3)/ embarazos hipertensos (10127) 
+#tener en cuenta que un embarazo puede estar en varios grupos, por lo tanto influyendo en varios %
+```
+
+
+
+
+
+
+## TOP antihipertensivos MÁS USADOS POR PERIODO en embarazos con HC
+
+```{r}
+#Calculate total n per trimestre  para las embarazadas con hipertension
+n_trim <- pregnancies_cohort_hiper |>
+  summarize(grupo_trim0=sum(!is.na(fecha_inicio_13s_antes)),
+            grupo_trim1=sum(!is.na(fecha_inicio_1t)),
+            grupo_trim2=sum(!is.na(fecha_inicio_2t)),
+            grupo_trim3=sum(!is.na(fecha_inicio_3t)),
+            grupo_trim4=sum(!is.na(fecha_inicio_13s_despues)))
+
+n_trim <- data.frame(n_trim=c(t(n_trim)), periodo_exposicion=0:4)
+
+cohort_disp <- gaia_embarazos_hiper |>
+  group_by(periodo_exposicion, atc_cod, prin_act_cod) |>  # Agrupar por los criterios necesarios (comprobar porq no agruapr por pres_farma_cod tb)
+  summarize(
+    value = n_distinct(embarazo_id),  # Contar identificadores únicos (cuantas mujeres para cada grupo de atc_cod en cada periodo de exposición)
+    .groups = "drop"
+  ) |>
+  left_join(n_trim, by="periodo_exposicion")|>  # Agrupar solo por periodo_exposicion para la tasa
+  mutate(rate = round(value / n_trim * 100, 2)) |>  # Calcular el porcentaje por periodo (n_distinc(embarazos atc)/n(embarazos en ese trimestre))
+  ungroup() |> 
+  arrange(periodo_exposicion, desc(rate))  # Ordenar primero por periodo, luego por % descendente
+#número de grupos, no de embarazadas
+
+
+
+#nos quedamos solo con los antihipertensivos
+atc_grupos=c("C02", "C03", "C07", "C08", 'C09')
+cohort_disp_atc =cohort_disp%>% filter(substr(atc_cod,1,3) %in% atc_grupos )
+
+```
+
+
+
+
+
+
+### periodo 0
+```{r}
+filtered_data <- cohort_disp_atc |>
+  filter(periodo_exposicion == 0) |>
+  arrange(desc(value)) |>
+  select(-periodo_exposicion, -n_trim)
+
+filtered_data <- merge(filtered_data, 
+                       maestro_atc[, c("atc_cod", "prin_act_cod", "prin_act_desc")], 
+                       by = c("atc_cod", "prin_act_cod"), 
+                       all.x = TRUE)
+filtered_data <- filtered_data[!duplicated(filtered_data[c("atc_cod", "prin_act_cod")], fromLast = TRUE), ]
+filtered_data =filtered_data %>% arrange(desc(value))
+kable((filtered_data |> arrange(desc(value))), format = "markdown", col.names = c("atc_cod", "prin_act_cod", "Valor",'rate','prin_act_desc' ))
+
+#aquí el valor son embarazos dentro de cada grupo de (periodo, atc_cod y prin_act_cod)
+#el porcentaje  = número de embarazos que toman ese ATC en el primer trimestre / embarazos hipertensos activos en el primer periodo 
+
+```
+
+
+### periodo 1
+```{r}
+filtered_data <- cohort_disp_atc |>
+  filter(periodo_exposicion == 1) |>
+  arrange(desc(value)) |>
+  select(-periodo_exposicion, -n_trim)
+
+filtered_data <- merge(filtered_data, 
+                       maestro_atc[, c("atc_cod", "prin_act_cod", "prin_act_desc")], 
+                       by = c("atc_cod", "prin_act_cod"), 
+                       all.x = TRUE)
+filtered_data <- filtered_data[!duplicated(filtered_data[c("atc_cod", "prin_act_cod")], fromLast = TRUE), ]
+filtered_data =filtered_data %>% arrange(desc(value))
+kable((filtered_data |> arrange(desc(value))), format = "markdown", col.names = c("atc_cod", "prin_act_cod", "Valor",'rate','prin_act_desc' ))
+
+#aquí el valor son embarazos dentro de cada grupo de (periodo, atc_cod y prin_act_cod)
+#el porcentaje  = número de embarazos que toman ese ATC en el primer trimestre / 
+
+```
+
+### periodo 2
+```{r}
+filtered_data <- cohort_disp_atc |>
+  filter(periodo_exposicion == 2) |>
+  arrange(desc(value)) |>
+  select(-periodo_exposicion, -n_trim)
+
+filtered_data <- merge(filtered_data, 
+                       maestro_atc[, c("atc_cod", "prin_act_cod", "prin_act_desc")], 
+                       by = c("atc_cod", "prin_act_cod"), 
+                       all.x = TRUE)
+filtered_data <- filtered_data[!duplicated(filtered_data[c("atc_cod", "prin_act_cod")], fromLast = TRUE), ]
+filtered_data =filtered_data %>% arrange(desc(value))
+kable((filtered_data |> arrange(desc(value))), format = "markdown", col.names = c("atc_cod", "prin_act_cod", "Valor",'rate','prin_act_desc' ))
+
+#aquí el valor son embarazos dentro de cada grupo de (periodo, atc_cod y prin_act_cod)
+#el porcentaje  = número de embarazos que toman ese ATC en el primer trimestre / 
+
+```
+
+
+### periodo 3
+```{r}
+filtered_data <- cohort_disp_atc |>
+  filter(periodo_exposicion == 3) |>
+  arrange(desc(value)) |>
+  select(-periodo_exposicion, -n_trim)
+
+filtered_data <- merge(filtered_data, 
+                       maestro_atc[, c("atc_cod", "prin_act_cod", "prin_act_desc")], 
+                       by = c("atc_cod", "prin_act_cod"), 
+                       all.x = TRUE)
+filtered_data <- filtered_data[!duplicated(filtered_data[c("atc_cod", "prin_act_cod")], fromLast = TRUE), ]
+filtered_data =filtered_data %>% arrange(desc(value))
+kable((filtered_data |> arrange(desc(value))), format = "markdown", col.names = c("atc_cod", "prin_act_cod", "Valor",'rate','prin_act_desc' ))
+
+#aquí el valor son embarazos dentro de cada grupo de (periodo, atc_cod y prin_act_cod)
+#el porcentaje  = número de embarazos que toman ese ATC en el primer trimestre / 
+
+```
+
+### periodo 4
+```{r}
+filtered_data <- cohort_disp_atc |>
+  filter(periodo_exposicion == 4) |>
+  arrange(desc(value)) |>
+  select(-periodo_exposicion, -n_trim)
+
+filtered_data <- merge(filtered_data, 
+                       maestro_atc[, c("atc_cod", "prin_act_cod", "prin_act_desc")], 
+                       by = c("atc_cod", "prin_act_cod"), 
+                       all.x = TRUE)
+filtered_data <- filtered_data[!duplicated(filtered_data[c("atc_cod", "prin_act_cod")], fromLast = TRUE), ]
+filtered_data =filtered_data %>% arrange(desc(value))
+kable((filtered_data |> arrange(desc(value))), format = "markdown", col.names = c("atc_cod", "prin_act_cod", "Valor",'rate','prin_act_desc' ))
+
+#aquí el valor son embarazos dentro de cada grupo de (periodo, atc_cod y prin_act_cod)
+#el porcentaje  = número de embarazos que toman ese ATC en el primer trimestre / 
+
+```
+
