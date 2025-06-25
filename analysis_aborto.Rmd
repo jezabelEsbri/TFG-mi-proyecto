@@ -1,0 +1,1661 @@
+---
+title: "analysis_aborto"
+output: html_document
+date: "2025-05-22"
+---
+
+```{r, include=FALSE}
+# Configurar las opciones globalmente para todo el documento
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+```
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(plotly)
+library(kableExtra)
+library(haven)
+library(reactable)
+library(grid)
+library(gridExtra)
+library(patchwork)
+library(paletteer)
+library(haven)
+library(tidyr)
+library(DT)
+library(crosstalk)
+library(lubridate) 
+library(data.table)
+library(arrow)
+library(scales)
+library(forcats)
+library(stringr)
+library(purrr)
+library(ggrepel)
+library(gt)
+library(pROC)
+library(epitools)
+
+c <- c(
+  "#cce7df",  
+  "#93a29e",
+  "#b7ded2",  
+  "#a4c7bd",  
+  "#92b1a8",  
+  "#809b93",
+  "#bfb5b2" ,
+  "#6d857e",  
+  "#5b6f69",  
+  "#495854" ,"#bfb5b2" ,"#cce7df","#92b1a8","#495854" , "#a4c7bd")
+
+
+```
+```{r}
+pregnancies_cohort <- readRDS("E:/EMBARAZO/PREGVAL/1-DATOS/3-PROCESADOS/pregnancy_algorithm/pregnancies_cohort_table_6m_lookback.RDS") |> 
+  # obtain pregnancies from 01-07-2009
+  tidylog::filter(fecha_inicio >= ymd("2009-07-01"))  |>
+  distinct()
+pregnancies_cohort_hiper=pregnancies_cohort %>% filter(m_hypertension==1) 
+```
+
+
+```{r}
+#GAIA 10127 embarazos hipertensos
+gaia_embarazos_hiper_comp=read.csv("E:/VID/V1/2-SCRIPTS/Jezabel/gaia_embarazos_hiper_comp.csv")
+emb = gaia_embarazos_hiper_comp %>% distinct(embarazo_id)
+```
+eliminamos edades extremas y 'arreglamos' un registro de aborto que no es:
+```{r}
+gaia_embarazos_hiper_comp = gaia_embarazos_hiper_comp%>% filter(age>12 & age<55)
+gaia_embarazos_hiper_comp <- gaia_embarazos_hiper_comp %>%
+  mutate(
+    tipo_fin = if_else(tipo_fin == "spontaneous abortion" & duration > 200,
+                       "stillbirth",
+                       tipo_fin)
+  )
+```
+
+Creamos la variable que indica si ha sido tratada con antihipertensivos en el primer periodo.
+```{r}
+gaia_embarazos_hiper_comp <- gaia_embarazos_hiper_comp %>%
+  group_by(embarazo_id) %>%
+  mutate(tratadas_p1 = ifelse(any(substr(atc_cod, 1, 3) %in% c("C02", "C03", "C07", "C08", "C09") & periodo_exposicion == 1), 1, 0)) %>%
+  ungroup()
+```
+
+Creamos la variable que indica si ha tomado medicamentos potencialmente teratogénicos:
+```{r}
+#Creamos la variable que indica si ha tomado medicamentos potencialmente teratogénicos:
+gaia_embarazos_hiper_comp <- gaia_embarazos_hiper_comp %>%
+  group_by(embarazo_id) %>%
+  mutate(
+    teratogenicos = ifelse(
+      any(
+        atc_cod %in% c("H02AB", "G03XA01", "J02AC01", "H03BB02", "H03BA02",
+                       "N03AG01", "N03AF01", "N03AA02", "N03AB02", "N03AX11", "D10BA01") &
+        periodo_exposicion == 1
+      ),
+      1,
+      0
+    )
+  ) %>%
+  ungroup()
+```
+
+
+
+```{r}
+# O uno por grupo:
+corticoesteroides <-c("H02AB") 
+antitiroideos     <- c("H03BB02", "H03BA02",'H03BB52' ) #metimazol, propiltiouracilo
+antiepilepticos   <- c("N03AG01", "N03AF01", "N03AA02", "N03AB02",'N03AB52', "N03AX11") #valproato, carbamazepina, fenobarbital, fenitoína,topiramate
+antimicoticos     <- c("J02AC01") #fluconazole
+hormonales        <- c("G03XA01") #danazol
+retinoides        <- c("D10BA01", "D10AD04", "D10AD54") #isotretinoin
+
+gaia_embarazos_hiper_comp <- gaia_embarazos_hiper_comp %>%
+  group_by(embarazo_id) %>%
+  mutate(
+    corticoesteroides_p1 = ifelse(any(atc_cod %in% corticoesteroides & periodo_exposicion == 1), 1, 0),
+    antitiroideos_p1     = ifelse(any(atc5_cod %in% antitiroideos & periodo_exposicion == 1), 1, 0),
+    antiepilepticos_p1   = ifelse(any(atc5_cod %in% antiepilepticos & periodo_exposicion == 1), 1, 0),
+    antimicoticos_p1     = ifelse(any(atc5_cod %in% antimicoticos & periodo_exposicion == 1), 1, 0),
+    hormonales_p1        = ifelse(any(atc5_cod %in% hormonales & periodo_exposicion == 1), 1, 0),
+    retinoides_p1        = ifelse(any(atc5_cod %in% retinoides & periodo_exposicion == 1), 1, 0)
+  ) %>%
+  ungroup()
+
+
+```
+
+
+```{r}
+#añadimos el imc imputado y el nuevo obesity:
+pregnancies_cohort_hiper_imc = read.csv("E:/VID/V1/2-SCRIPTS/Jezabel/pregnancies_cohort_hiper_imc.csv")
+preg_imc = pregnancies_cohort_hiper_imc %>% select(embarazo_id, value_imc, obesity_final,imputado)
+
+gaia_embarazos_hiper_comp = gaia_embarazos_hiper_comp %>% left_join(preg_imc, by='embarazo_id'
+                                                                    )
+```
+
+```{r}
+#añadimos aborto previo si/no:
+pregnancies_cohort_hiper_aborto_prev = read.csv("E:/VID/V1/2-SCRIPTS/Jezabel/pregnancies_cohort_hiper_aborto_prev.csv")
+preg_aborto_prev = pregnancies_cohort_hiper_aborto_prev %>% select(embarazo_id, prev_aborto)
+
+gaia_embarazos_hiper_comp = gaia_embarazos_hiper_comp %>% left_join(preg_aborto_prev, by='embarazo_id'
+                                                                    )
+```
+
+
+# comparación poblaciones
+Como se distribuyen en tipo fin y comparación de sus características (las comparaciones son de tratadas en el periodo 1 vs no tratadas en periodo 1):
+
+(la comparacion con tratadas en periodos 1:3 está en el abstract)
+
+(hay 3211 embarazos tratados en 1 periodo)
+
+abortos:
+```{r}
+tabla <- gaia_embarazos_hiper_comp %>%
+  group_by(embarazo_id) %>%
+  summarise(
+    tipo_fin = first(tipo_fin),
+    tratadas_p1 = first(tratadas_p1)
+  )
+table(tabla$tipo_fin,tabla$tratadas_p1)
+```
+
+anomalías congénitas:
+```{r}
+tabla <- gaia_embarazos_hiper_comp %>%
+  group_by(embarazo_id) %>%
+  summarise(
+    cong = first(o_cong),
+    tratadas_p1 = first(tratadas_p1)
+  )
+table(tabla$cong,tabla$tratadas_p1)
+```
+
+
+```{r}
+gaia_comparison_table <- gaia_embarazos_hiper_comp |>
+  group_by(sip, fecha_inicio) |>
+  mutate(
+    HC_tratada = any(substr(atc_cod, 1, 3) %in% c("C02", "C03", "C07", "C08", "C09") & periodo_exposicion ==1),  # Identificar si hay tratamiento
+    HC_category = case_when(
+      HC_tratada ~ "HC tratada",
+      TRUE ~ "HC no tratada"
+    )
+  ) |>
+  ungroup() |>  # Desagrupamos para evitar errores en el siguiente agrupamiento
+  group_by(m_diabetes, HC_category) |>
+  summarise(
+    N = n_distinct(paste(embarazo_id)),  # Contar embarazos únicos
+    .groups = "drop"
+  ) |>
+  # Calcular el porcentaje dentro de cada categoría de tratadas/no tratadas
+  group_by(HC_category) |>
+  mutate(
+    Percent = round((N / sum(N)) * 100, 2)
+  ) |>
+  ungroup()
+
+# Transformar la tabla a formato ancho para mejor visualización
+gaia_comparison_table_wide <- gaia_comparison_table |>
+  pivot_wider(
+    names_from = HC_category,
+    values_from = c(N, Percent),
+    names_sep = "_"
+  )
+
+# Agregar los totales generales a la tabla
+gaia_comparison_table_wide <- gaia_comparison_table_wide |>
+  mutate(
+    N_Total = rowSums(across(starts_with("N_"))),  # Sumar todas las columnas que empiezan con "N_"
+    Percent_Total = round((N_Total / sum(N_Total)) * 100, 2)  # Calcular el porcentaje total
+  )
+
+# Ajustar nombres de columnas para evitar problemas
+colnames(gaia_comparison_table_wide) <- make.names(colnames(gaia_comparison_table_wide))
+
+# Crear la tabla con formato GT
+gaia_comparison_table_wide |>  
+  gt() |>
+  fmt_markdown(columns = everything()) |>
+  cols_label(
+    m_diabetes = "DIABETES",
+    N_HC.tratada = "N",
+    Percent_HC.tratada = "Percent",
+    N_HC.no.tratada = "N",
+    Percent_HC.no.tratada = "Percent",
+    N_Total = "N",
+    Percent_Total = "Percent"
+  ) |>
+  tab_spanner(
+    label = "HC tratada",
+    columns = c(N_HC.tratada, Percent_HC.tratada)
+  ) |>
+  tab_spanner(
+    label = "HC no tratada",
+    columns = c(N_HC.no.tratada, Percent_HC.no.tratada)
+  ) |>
+  tab_spanner(
+    label = "Totales generales",
+    columns = c(N_Total, Percent_Total)
+  ) |>
+  fmt_number(
+    drop_trailing_zeros = TRUE,
+    columns = everything()
+  )
+
+
+
+
+
+# EXCLUSION RISK
+
+gaia_embarazos_hiper_exc=gaia_embarazos_hiper_comp%>%filter(exclusion_risk!='no information available')
+
+gaia_comparison_table <- gaia_embarazos_hiper_exc |>
+  group_by(sip, fecha_inicio) |>
+  mutate(
+    HC_tratada = any(substr(atc_cod, 1, 3) %in% c("C02", "C03", "C07", "C08", "C09") & periodo_exposicion == 1),  # Identificar si hay tratamiento
+    HC_category = case_when(
+      HC_tratada ~ "HC tratada",
+      TRUE ~ "HC no tratada"
+    )
+  ) |>
+  ungroup() |>  # Desagrupamos para evitar errores en el siguiente agrupamiento
+  group_by(exclusion_risk, HC_category) |>
+  summarise(
+    N = n_distinct(paste(embarazo_id)),  # Contar embarazos únicos
+    .groups = "drop"
+  ) |>
+  # Calcular el porcentaje dentro de cada categoría de tratadas/no tratadas
+  group_by(HC_category) |>
+  mutate(
+    Percent = round((N / sum(N)) * 100, 2)
+  ) |>
+  ungroup()
+
+# Transformar la tabla a formato ancho para mejor visualización
+gaia_comparison_table_wide <- gaia_comparison_table |>
+  pivot_wider(
+    names_from = HC_category,
+    values_from = c(N, Percent),
+    names_sep = "_"
+  )
+
+# Agregar los totales generales a la tabla
+gaia_comparison_table_wide1 <- gaia_comparison_table_wide |>
+  mutate(
+    N_Total = rowSums(across(starts_with("N_"))),  # Sumar todas las columnas que empiezan con "N_"
+    Percent_Total = round((N_Total / sum(N_Total)) * 100, 2)  # Calcular el porcentaje total
+  )
+
+# Ajustar nombres de columnas para evitar problemas
+colnames(gaia_comparison_table_wide1) <- make.names(colnames(gaia_comparison_table_wide1))
+
+# Crear la tabla con formato GT
+gaia_comparison_table_wide1 |>  
+  gt() |>
+  fmt_markdown(columns = everything()) |>
+  cols_label(
+    exclusion_risk = "EXCLUSION RISK ",
+    N_HC.tratada = "N",
+    Percent_HC.tratada = "Percent",
+    N_HC.no.tratada = "N",
+    Percent_HC.no.tratada = "Percent",
+    N_Total = "N",
+    Percent_Total = "Percent"
+  ) |>
+  tab_spanner(
+    label = "HC tratada",
+    columns = c(N_HC.tratada, Percent_HC.tratada)
+  ) |>
+  tab_spanner(
+    label = "HC no tratada",
+    columns = c(N_HC.no.tratada, Percent_HC.no.tratada)
+  ) |>
+  tab_spanner(
+    label = "Totales generales",
+    columns = c(N_Total, Percent_Total)
+  ) |>
+  fmt_number(
+    drop_trailing_zeros = TRUE,
+    columns = everything()
+  )
+
+
+
+
+# ALCOHOL
+
+gaia_comparison_table <- gaia_embarazos_hiper_comp |>
+  group_by(sip, fecha_inicio) |>
+  mutate(
+    HC_tratada = any(substr(atc_cod, 1, 3) %in% c("C02", "C03", "C07", "C08", "C09") & periodo_exposicion == 1),  # Identificar si hay tratamiento
+    HC_category = case_when(
+      HC_tratada ~ "HC tratada",
+      TRUE ~ "HC no tratada"
+    )
+  ) |>
+  ungroup() |>  # Desagrupamos para evitar errores en el siguiente agrupamiento
+  group_by(m_alcohol, HC_category) |>
+  summarise(
+    N = n_distinct(paste(embarazo_id)),  # Contar embarazos únicos
+    .groups = "drop"
+  ) |>
+  # Calcular el porcentaje dentro de cada categoría de tratadas/no tratadas
+  group_by(HC_category) |>
+  mutate(
+    Percent = round((N / sum(N)) * 100, 2)
+  ) |>
+  ungroup()
+
+# Transformar la tabla a formato ancho para mejor visualización
+gaia_comparison_table_wide <- gaia_comparison_table |>
+  pivot_wider(
+    names_from = HC_category,
+    values_from = c(N, Percent),
+    names_sep = "_"
+  )
+
+# Agregar los totales generales a la tabla
+gaia_comparison_table_wide2 <- gaia_comparison_table_wide |>
+  mutate(
+    N_Total = rowSums(across(starts_with("N_"))),  # Sumar todas las columnas que empiezan con "N_"
+    Percent_Total = round((N_Total / sum(N_Total)) * 100, 2)  # Calcular el porcentaje total
+  )
+
+# Ajustar nombres de columnas para evitar problemas
+colnames(gaia_comparison_table_wide2) <- make.names(colnames(gaia_comparison_table_wide2))
+
+# Crear la tabla con formato GT
+gaia_comparison_table_wide2 |>  
+  gt() |>
+  fmt_markdown(columns = everything()) |>
+  cols_label(
+    m_alcohol = "Alcohol",
+    N_HC.tratada = "N",
+    Percent_HC.tratada = "Percent",
+    N_HC.no.tratada = "N",
+    Percent_HC.no.tratada = "Percent",
+    N_Total = "N",
+    Percent_Total = "Percent"
+  ) |>
+  tab_spanner(
+    label = "HC tratada",
+    columns = c(N_HC.tratada, Percent_HC.tratada)
+  ) |>
+  tab_spanner(
+    label = "HC no tratada",
+    columns = c(N_HC.no.tratada, Percent_HC.no.tratada)
+  ) |>
+  tab_spanner(
+    label = "Totales generales",
+    columns = c(N_Total, Percent_Total)
+  ) |>
+  fmt_number(
+    drop_trailing_zeros = TRUE,
+    columns = everything()
+  )
+
+
+
+
+# SMOKING
+
+gaia_comparison_table <- gaia_embarazos_hiper_comp |>
+  group_by(sip, fecha_inicio) |>
+  mutate(
+    HC_tratada = any(substr(atc_cod, 1, 3) %in% c("C02", "C03", "C07", "C08", "C09") & periodo_exposicion == 1),  # Identificar si hay tratamiento
+    HC_category = case_when(
+      HC_tratada ~ "HC tratada",
+      TRUE ~ "HC no tratada"
+    )
+  ) |>
+  ungroup() |>  # Desagrupamos para evitar errores en el siguiente agrupamiento
+  group_by(m_smoking, HC_category) |>
+  summarise(
+    N = n_distinct(paste(embarazo_id)),  # Contar embarazos únicos
+    .groups = "drop"
+  ) |>
+  # Calcular el porcentaje dentro de cada categoría de tratadas/no tratadas
+  group_by(HC_category) |>
+  mutate(
+    Percent = round((N / sum(N)) * 100, 2)
+  ) |>
+  ungroup()
+
+# Transformar la tabla a formato ancho para mejor visualización
+gaia_comparison_table_wide <- gaia_comparison_table |>
+  pivot_wider(
+    names_from = HC_category,
+    values_from = c(N, Percent),
+    names_sep = "_"
+  )
+
+# Agregar los totales generales a la tabla
+gaia_comparison_table_wide3 <- gaia_comparison_table_wide |>
+  mutate(
+    N_Total = rowSums(across(starts_with("N_"))),  # Sumar todas las columnas que empiezan con "N_"
+    Percent_Total = round((N_Total / sum(N_Total)) * 100, 2)  # Calcular el porcentaje total
+  )
+
+# Ajustar nombres de columnas para evitar problemas
+colnames(gaia_comparison_table_wide3) <- make.names(colnames(gaia_comparison_table_wide3))
+
+# Crear la tabla con formato GT
+gaia_comparison_table_wide3 |>  
+  gt() |>
+  fmt_markdown(columns = everything()) |>
+  cols_label(
+    m_smoking = "SMOKING",
+    N_HC.tratada = "N",
+    Percent_HC.tratada = "Percent",
+    N_HC.no.tratada = "N",
+    Percent_HC.no.tratada = "Percent",
+    N_Total = "N",
+    Percent_Total = "Percent"
+  ) |>
+  tab_spanner(
+    label = "HC tratada",
+    columns = c(N_HC.tratada, Percent_HC.tratada)
+  ) |>
+  tab_spanner(
+    label = "HC no tratada",
+    columns = c(N_HC.no.tratada, Percent_HC.no.tratada)
+  ) |>
+  tab_spanner(
+    label = "Totales generales",
+    columns = c(N_Total, Percent_Total)
+  ) |>
+  fmt_number(
+    drop_trailing_zeros = TRUE,
+    columns = everything()
+  )
+
+
+
+# m_obesity
+
+gaia_comparison_table <- gaia_embarazos_hiper_comp |>
+  group_by(sip, fecha_inicio) |>
+  mutate(
+    HC_tratada = any(substr(atc_cod, 1, 3) %in% c("C02", "C03", "C07", "C08", "C09") & periodo_exposicion ==1),  # Identificar si hay tratamiento
+    HC_category = case_when(
+      HC_tratada ~ "HC tratada",
+      TRUE ~ "HC no tratada"
+    )
+  ) |>
+  ungroup() |>  # Desagrupamos para evitar errores en el siguiente agrupamiento
+  group_by(m_obesity, HC_category) |>
+  summarise(
+    N = n_distinct(paste(embarazo_id)),  # Contar embarazos únicos
+    .groups = "drop"
+  ) |>
+  # Calcular el porcentaje dentro de cada categoría de tratadas/no tratadas
+  group_by(HC_category) |>
+  mutate(
+    Percent = round((N / sum(N)) * 100, 2)
+  ) |>
+  ungroup()
+
+# Transformar la tabla a formato ancho para mejor visualización
+gaia_comparison_table_wide <- gaia_comparison_table |>
+  pivot_wider(
+    names_from = HC_category,
+    values_from = c(N, Percent),
+    names_sep = "_"
+  )
+
+# Agregar los totales generales a la tabla
+gaia_comparison_table_wide4 <- gaia_comparison_table_wide |>
+  mutate(
+    N_Total = rowSums(across(starts_with("N_"))),  # Sumar todas las columnas que empiezan con "N_"
+    Percent_Total = round((N_Total / sum(N_Total)) * 100, 2)  # Calcular el porcentaje total
+  )
+
+# Ajustar nombres de columnas para evitar problemas
+colnames(gaia_comparison_table_wide4) <- make.names(colnames(gaia_comparison_table_wide4))
+
+# Crear la tabla con formato GT
+gaia_comparison_table_wide4 |>  
+  gt() |>
+  fmt_markdown(columns = everything()) |>
+  cols_label(
+    m_obesity = "OBESITY",
+    N_HC.tratada = "N",
+    Percent_HC.tratada = "Percent",
+    N_HC.no.tratada = "N",
+    Percent_HC.no.tratada = "Percent",
+    N_Total = "N",
+    Percent_Total = "Percent"
+  ) |>
+  tab_spanner(
+    label = "HC tratada",
+    columns = c(N_HC.tratada, Percent_HC.tratada)
+  ) |>
+  tab_spanner(
+    label = "HC no tratada",
+    columns = c(N_HC.no.tratada, Percent_HC.no.tratada)
+  ) |>
+  tab_spanner(
+    label = "Totales generales",
+    columns = c(N_Total, Percent_Total)
+  ) |>
+  fmt_number(
+    drop_trailing_zeros = TRUE,
+    columns = everything()
+  )
+
+```
+```{r}
+gaia_comparison_table <- gaia_embarazos_hiper_comp |>
+  group_by(sip, fecha_inicio) |>
+  mutate(
+    HC_tratada = any(substr(atc_cod, 1, 3) %in% c("C02", "C03", "C07", "C08", "C09") & periodo_exposicion == 1),  
+    HC_category = case_when(
+      HC_tratada ~ "HC tratada",
+      TRUE ~ "HC no tratada"
+    )
+  ) |>   
+  group_by(HC_category) |>
+  summarise(
+    N = n_distinct(embarazo_id),  
+    edad_media = mean(age, na.rm = TRUE),  
+    .groups = "drop"
+  )
+
+# Aplicar formato estético con gt()
+gaia_comparison_table_wide <- gaia_comparison_table |>  
+  gt() |>
+  fmt_markdown(columns = everything()) |>
+  cols_label(
+    HC_category = "Hipertensión Categoría",
+    N = "N",
+    edad_media = "Edad media"
+  )
+
+gaia_comparison_table_wide
+```
+ 
+# Análisis
+
+## Riesgos absolutos y relativos
+
+Para abortos:
+```{r}
+tabla <- gaia_embarazos_hiper_comp %>%
+  group_by(embarazo_id) %>%
+  summarise(
+    tipo_fin = first(tipo_fin),
+    tratadas_p1 = first(tratadas_p1)
+  )
+
+tabla <- tabla %>%
+  mutate(
+    aborto_espontaneo = ifelse(tipo_fin == "spontaneous abortion", 1, 0),
+    tratadas_p1 = as.factor(tratadas_p1)
+  )
+
+riesgos <- tabla %>%
+  group_by(tratadas_p1) %>%
+  summarise(
+    total = n(),
+    casos_aborto = sum(aborto_espontaneo),
+    riesgo_absoluto = casos_aborto / total
+  )
+
+print(riesgos)
+```
+
+```{r}
+# Crear tabla de contingencia
+tabla_cont <- table(tabla$tratadas_p1, tabla$aborto_espontaneo)
+
+# Calcular OR e IC del 95%
+or_resultado <- oddsratio(tabla_cont)
+
+# Extraer valores y redondear a dos decimales
+or_medida <- round(or_resultado$measure, 2)  # OR e IC
+p_valores <- round(or_resultado$p.value, 2)  # p-value
+
+# Crear tabla final con columnas requeridas
+tabla_final <- data.frame(
+  grupo = ifelse(rownames(tabla_cont) == "1", "Tratadas", "No Tratadas"),
+  n = rowSums(tabla_cont),  # Número total en cada grupo
+  casos = tabla_cont[, 2],  # Casos en cada grupo
+  tasa = round(tabla_cont[, 2] / rowSums(tabla_cont), 2),  # Tasa de abortos
+  OR_IC95 = paste0(or_medida[, 1], " (", or_medida[, 2], " - ", or_medida[, 3], ")"),  # OR con IC entre paréntesis
+  p_value = p_valores[, 1]  # p-value
+) %>% arrange(desc(grupo))  # Ordenar poniendo "Tratadas" primero
+
+
+```
+
+## IPWT
+```{r}
+gaia_embarazos_hiper_comp <- gaia_embarazos_hiper_comp %>% mutate(abortion = if_else(tipo_fin =='spontaneous abortion',1,0))
+
+
+#gaia_embarazos_hiper_comp <- gaia_embarazos_hiper_comp %>%
+ # mutate(age_group = cut(
+  #  age,
+   # breaks = c(-Inf, 24, 29, 34, 39, Inf),
+   # labels = c("<25", "25-29", "30-34", "35-39", "≥40"),
+  #  right = TRUE
+  #))
+```
+
+creamos la base de datos para los análisis.
+```{r}
+
+vars = c('age','country','exclusion_risk',"m_smoking","m_alcohol","m_drug_abuse","m_diabetes","obesity_final","m_lipid",'m_depression',
+         'm_anxiety',"m_psychotic",'prev_aborto')
+#la depresión y la epilepsia también salían importantes para separar tratadas de no tratadas
+
+gaia_embarazos_hiper_comp_inter <- gaia_embarazos_hiper_comp  %>%
+  mutate(exclusion_risk = relevel(factor(exclusion_risk), ref = "not at risk")) #para que coj acomo referncia el not ar risk
+
+# Seleccionar datos y asegurarse que las variables estén en formato correcto
+ps_data <- gaia_embarazos_hiper_comp_inter %>%
+  select(embarazo_id,abortion,tratadas_p1, all_of(vars)) %>%
+  distinct(embarazo_id, .keep_all = TRUE)  #elimina duplicados embarazo (se queda con el primero)
+
+
+formula_ajustada <- as.formula(paste("abortion ~ tratadas_p1 +", paste(vars, collapse = " + ")))
+```
+
+
+Cálculo de propensity scores:
+```{r}
+modelo_ps <- glm(tratadas_p1 ~ ., data = ps_data %>% select(-embarazo_id,-abortion), family = binomial)
+
+# Calcular propensity scores
+ps_data$pscore <- predict(modelo_ps, type = "response")
+
+summary(modelo_ps)
+```
+
+
+
+```{r}
+#ps_data <- ps_data %>%
+ # mutate(tratadas_p1 = case_when(
+  #  tratadas_p1 == "1" ~ "SI",
+   # tratadas_p1 == "0" ~ "NO" # Mantiene los valores originales si no coinciden
+#  ))
+ggplot(ps_data, aes(x = pscore, fill = as.factor(tratadas_p1))) +
+  geom_density(alpha = 0.4) +
+  scale_fill_manual(values = c("steelblue", "firebrick")) +
+  labs(
+    title = "Distribución del Propensity Score por Grupo de tratados",
+    x = "Propensity Score",
+    y = "Densidad",
+    fill = "Tratadas en el primer periodo"
+  )+
+  theme_minimal()
+
+```
+Solapamiento = para cada individuo del grupo con malformaciones, hay uno comparable sin malformaciones con un propensity similar.
+Entonces, el emparejamiento es posible y fiable.
+
+
+Calculamos los pesos estandarizados
+```{r}
+# Proporción global de tratados y no tratados
+p_tratado <- mean(ps_data$tratadas_p1 == 1)
+p_no_tratado <- 1 - p_tratado
+
+# Calcular peso estabilizado
+ps_data <- ps_data %>%
+  mutate(
+    weight_iptw = case_when(
+      tratadas_p1 == 1 ~ p_tratado / pscore,
+      tratadas_p1 == 0 ~ p_no_tratado / (1 - pscore)
+    )
+  )
+
+```
+
+Diferencias estandarizadas antes y después de aplicar los pesos
+```{r}
+library(tableone)
+library(survey)
+
+
+
+# Crear diseño con pesos IPTW
+design_ps <- svydesign(ids = ~1, data = ps_data, weights = ~weight_iptw)
+
+# Tabla sin ponderar
+tabla_sin_peso <- CreateTableOne(vars, strata = "tratadas_p1", data = ps_data, test = FALSE)
+
+# Tabla ponderada con IPTW
+tabla_con_peso <- svyCreateTableOne(vars, strata = "tratadas_p1", data = design_ps, test = FALSE)
+
+# Mostrar tablas con SMD
+print(tabla_sin_peso, smd = TRUE)
+print(tabla_con_peso, smd = TRUE)
+
+```
+
+
+CON LOS PESOS:
+
+```{r}
+# Calcular riesgos con pesos
+riesgos_ponderados <- ps_data %>%
+  group_by(tratadas_p1) %>%
+  summarise(
+    total_ponderado = sum(weight_iptw), # Total ponderado
+    casos_cong_ponderados = sum(weight_iptw * abortion), # Casos ponderados
+    riesgo_absoluto_ponderado = casos_cong_ponderados / total_ponderado # Riesgo absoluto ponderado
+  )
+
+print(riesgos_ponderados)
+
+# Crear tabla de contingencia ponderada
+library(survey)
+
+# Crear diseño con pesos
+design_ps <- svydesign(ids = ~1, data = ps_data, weights = ~weight_iptw)
+
+# Tabla de contingencia ponderada
+tabla_cont_ponderada <- svytable(~tratadas_p1 + abortion, design = design_ps)
+print(tabla_cont_ponderada)
+
+# Calcular RR e IC del 95% ponderado
+rr_ponderado <- riskratio(tabla_cont_ponderada)
+print(rr_ponderado)
+
+```
+
+y además, AJUSTADO:
+```{r}
+formula_ajustada <- as.formula(paste("abortion ~ tratadas_p1 +", paste(vars, collapse = " + ")))
+
+# Ajustar el modelo usando la fórmula
+modelo_ajustado <- glm(formula_ajustada, data = ps_data, weights = ps_data$weight_iptw, family = binomial)
+
+# Resumen del modelo ajustado
+summary(modelo_ajustado)
+```
+
+```{r}
+# Cargar librería necesaria
+library(broom)
+library(knitr)
+library(dplyr)
+
+# Extraer coeficientes del modelo ajustado
+resultado_or <- tidy(modelo_ajustado, exponentiate = TRUE, conf.int = TRUE)
+
+# Filtrar solo la variable "tratadas_p1"
+resultado_tratadas <- resultado_or %>% filter(term == "tratadas_p1")
+
+# Redondear a dos decimales
+resultado_tratadas <- resultado_tratadas %>%
+  mutate(across(where(is.numeric), round, 2))
+
+# Extraer OR e IC como texto
+or_ic95 <- paste0(resultado_tratadas$estimate, " (", resultado_tratadas$conf.low, " - ", resultado_tratadas$conf.high, ")")
+
+# Crear tabla con solo dos filas (una por grupo)
+tabla_modelo_iptw <- ps_data %>% 
+  group_by(tratadas_p1) %>% 
+  summarise(
+    n       = sum(weight_iptw),                 # Tamaño efectivo (puede ser decimal)
+    casos  = sum(weight_iptw * abortion),      # Abortos ponderados
+    tasa    = round(casos / n, 4) # Riesgo ponderado
+  ) %>% 
+  mutate(
+    grupo   = if_else(tratadas_p1 == 1, "Tratadas", "No Tratadas"),
+    OR_IC95 = if_else(grupo == "Tratadas", or_ic95, "-") # Solo mostramos OR para tratadas
+  )%>%  
+  arrange(desc(tratadas_p1)) %>% 
+  select(grupo, n, casos, tasa, OR_IC95) 
+
+
+# Agregar columna de OR solo para "Tratadas"
+tabla_modelo_iptw <- tabla_modelo_iptw %>%
+  mutate(OR_IC95 = ifelse(grupo == "Tratadas", or_ic95, "-"))
+
+```
+
+## Propensity Score Matching 
+
+aquí calcula internamente el PS(no estabilizado):
+```{r}
+#install.packages("MatchIt")  # si no lo tienes instalado
+library(MatchIt) 
+
+match_ps <- matchit(tratadas_p1 ~ m_smoking + m_alcohol + m_drug_abuse +  m_lipid + m_diabetes + 
+                      obesity_final  + age + exclusion_risk + country + m_depression + m_anxiety + m_psychotic + prev_aborto,
+                    data = ps_data,
+                    method = "nearest", # emparejamiento vecino más cercano (el PS más cercano) (lo calcula internamente para tratadas)
+                    ratio = 1, # relación 2:1
+                    caliper = 0.2 )       #límite de destancia a 0.2 desviaciones estándar    
+
+# Resumen del emparejamiento
+summary(match_ps)
+
+
+```
+
+
+Diferencias antes y después del matching
+```{r}
+# Extraer la base de datos emparejada
+matched_data <- match.data(match_ps)
+
+# Tabla sin ponderar
+tabla_sin_match <- CreateTableOne(vars, strata = "tratadas_p1", data = ps_data, test = FALSE)
+
+# Tabla ponderada con matching
+tabla_con_match <- CreateTableOne(vars, strata = "tratadas_p1", data = matched_data, test = FALSE)
+
+
+print(tabla_sin_match, smd = TRUE)
+print(tabla_con_match, smd = TRUE)
+```
+
+
+```{r}
+library(cobalt)
+love.plot(match_ps, binary = "std")  # gráfico de balance (SMD antes/después)
+```
+
+
+
+
+
+Riesgo relativo después de emparejar pero antes de ajustar: 
+
+```{r}
+
+# Tabla de riesgo absoluto en los emparejados
+riesgos_matched <- matched_data %>%
+  group_by(tratadas_p1) %>%
+  summarise(
+    total = n(),
+    casos_cong = sum(abortion),
+    riesgo = casos_cong / total
+  )
+
+print(riesgos_matched)
+
+
+
+ 
+tabla_cont_macth <- table(matched_data$tratadas_p1, matched_data$abortion)
+
+
+rr_resultado <- riskratio(tabla_cont_macth)
+
+print(rr_resultado)
+```
+
+
+Modelo emparejado y ajustado:
+```{r}
+modelo_ajustado <- glm(abortion ~ tratadas_p1 + m_smoking + m_alcohol + m_drug_abuse +  m_lipid + m_diabetes + 
+                      obesity_final  + age + exclusion_risk + country + m_depression + m_anxiety + m_psychotic + prev_aborto,
+                       data = matched_data, family = binomial)
+
+summary(modelo_ajustado)
+```
+
+```{r}
+# Cargar librería necesaria
+library(broom)
+library(knitr)
+library(dplyr)
+
+# Extraer coeficientes del modelo ajustado
+resultado_or <- tidy(modelo_ajustado, exponentiate = TRUE, conf.int = TRUE)
+
+# Filtrar solo la variable "tratadas_p1"
+resultado_tratadas <- resultado_or %>% filter(term == "tratadas_p1")
+
+# Redondear a dos decimales
+resultado_tratadas <- resultado_tratadas %>%
+  mutate(across(where(is.numeric), round, 2))
+
+# Extraer OR e IC como texto
+or_ic95 <- paste0(resultado_tratadas$estimate, " (", resultado_tratadas$conf.low, " - ", resultado_tratadas$conf.high, ")")
+
+tabla_modelo_match <- matched_data %>% 
+  group_by(tratadas_p1) %>% 
+  summarise(
+    n      = n(),                            # Número real de mujeres
+    casos  = sum(abortion),                  # Número real de abortos
+    tasa   = round(casos / n, 4)             # Tasa observada (riesgo absoluto)
+  ) %>% 
+  mutate(
+    grupo   = if_else(tratadas_p1 == 1, "Tratadas", "No Tratadas"),
+    OR_IC95 = if_else(grupo == "Tratadas", or_ic95, "-")  # Mostrar OR solo para tratadas
+  ) %>% 
+  arrange(desc(tratadas_p1)) %>% 
+  select(grupo, n, casos, tasa, OR_IC95)
+
+# Agregar columna de OR solo para "Tratadas"
+tabla_modelo_match <- tabla_modelo_match %>%
+  mutate(OR_IC95 = ifelse(grupo == "Tratadas", or_ic95, "-"))
+
+```
+# subanálisis abortos
+Para  tener encuenta la variable de control de la tensión
+```{r}
+gaia_embarazos_disp_ten_hiper = read.csv("E:/VID/V1/2-SCRIPTS/Jezabel/gaia_embarazos_disp_ten_hiper.csv")
+
+gaia_embarazos_disp_ten_hiper=gaia_embarazos_disp_ten_hiper %>% filter(!is.na(hipertension_post))
+num = gaia_embarazos_disp_ten_hiper%>% distinct(embarazo_id) #
+
+```
+```{r}
+gaia_embarazos_disp_ten_hiper = gaia_embarazos_disp_ten_hiper%>% filter(age>12 & age<55)
+gaia_embarazos_disp_ten_hiper <- gaia_embarazos_disp_ten_hiper %>%
+  mutate(
+    tipo_fin = if_else(tipo_fin == "spontaneous abortion" & duration > 200,
+                       "stillbirth",
+                       tipo_fin)
+  )
+```
+```{r}
+gaia_embarazos_disp_ten_hiper <- gaia_embarazos_disp_ten_hiper %>%
+  group_by(embarazo_id) %>%
+  mutate(tratadas_p1 = ifelse(any(substr(atc_cod, 1, 3) %in% c("C02", "C03", "C07", "C08", "C09") & periodo_exposicion == 1), 1, 0)) %>%
+  ungroup()
+```
+
+
+```{r}
+corticoesteroides <-c("H02AB") 
+antitiroideos     <- c("H03BB02", "H03BA02",'H03BB52' ) #metimazol, propiltiouracilo
+antiepilepticos   <- c("N03AG01", "N03AF01", "N03AA02", "N03AB02",'N03AB52', "N03AX11") #valproato, carbamazepina, fenobarbital, fenitoína,topiramate
+antimicoticos     <- c("J02AC01") #fluconazole
+hormonales        <- c("G03XA01") #danazol
+retinoides        <- c("D10BA01", "D10AD04", "D10AD54") #isotretinoin
+
+gaia_embarazos_disp_ten_hiper <- gaia_embarazos_disp_ten_hiper %>%
+  group_by(embarazo_id) %>%
+  mutate(
+    corticoesteroides_p1 = ifelse(any(atc_cod %in% corticoesteroides & periodo_exposicion == 1), 1, 0),
+    antitiroideos_p1     = ifelse(any(atc5_cod %in% antitiroideos & periodo_exposicion == 1), 1, 0),
+    antiepilepticos_p1   = ifelse(any(atc5_cod %in% antiepilepticos & periodo_exposicion == 1), 1, 0),
+    antimicoticos_p1     = ifelse(any(atc5_cod %in% antimicoticos & periodo_exposicion == 1), 1, 0),
+    hormonales_p1        = ifelse(any(atc5_cod %in% hormonales & periodo_exposicion == 1), 1, 0),
+    retinoides_p1        = ifelse(any(atc5_cod %in% retinoides & periodo_exposicion == 1), 1, 0)
+  ) %>%
+  ungroup()
+
+
+```
+
+
+```{r}
+gaia_embarazos_disp_ten_hiper = gaia_embarazos_disp_ten_hiper %>% left_join(preg_imc, by='embarazo_id')
+
+
+gaia_embarazos_disp_ten_hiper = gaia_embarazos_disp_ten_hiper %>% left_join(preg_aborto_prev, by='embarazo_id'
+                                                                    )
+
+
+gaia_embarazos_disp_ten_hiper <- gaia_embarazos_disp_ten_hiper %>% mutate(abortion = if_else(tipo_fin=='spontaneous abortion',1,0))
+
+
+#gaia_embarazos_disp_ten_hiper <- gaia_embarazos_disp_ten_hiper %>%
+ # mutate(age_group = cut(
+  #  age,
+   # breaks = c(-Inf, 24, 29, 34, 39, Inf),
+    #labels = c("<25", "25-29", "30-34", "35-39", "≥40"),
+  #  right = TRUE
+  #))
+```
+## Para abortos:
+
+```{r}
+tabla <- gaia_embarazos_disp_ten_hiper %>%
+  group_by(embarazo_id) %>%
+  summarise(
+    tipo_fin = first(tipo_fin),
+    tratadas_p1 = first(tratadas_p1)
+  )
+
+tabla <- tabla %>%
+  mutate(
+    aborto_espontaneo = ifelse(tipo_fin == "spontaneous abortion", 1, 0),
+    tratadas_p1 = as.factor(tratadas_p1)
+  )
+
+riesgos <- tabla %>%
+  group_by(tratadas_p1) %>%
+  summarise(
+    total = n(),
+    casos_aborto = sum(aborto_espontaneo),
+    riesgo_absoluto = casos_aborto / total
+  )
+
+print(riesgos)
+```
+
+```{r}
+# Crear tabla de contingencia
+tabla_cont <- table(tabla$tratadas_p1, tabla$aborto_espontaneo)
+
+# Calcular OR e IC del 95%
+or_resultado <- oddsratio(tabla_cont)
+
+# Extraer valores y redondear a dos decimales
+or_medida <- round(or_resultado$measure, 2)  # OR e IC
+p_valores <- round(or_resultado$p.value, 2)  # p-value
+
+# Crear tabla final con columnas requeridas
+tabla_final_sub <- data.frame(
+  grupo = ifelse(rownames(tabla_cont) == "1", "Tratadas", "No Tratadas"),
+  n = rowSums(tabla_cont),  # Número total en cada grupo
+  casos = tabla_cont[, 2],  # Casos en cada grupo
+  tasa = round(tabla_cont[, 2] / rowSums(tabla_cont), 2),  # Tasa de abortos
+  OR_IC95 = paste0(or_medida[, 1], " (", or_medida[, 2], " - ", or_medida[, 3], ")"),  # OR con IC entre paréntesis
+  p_value = p_valores[, 1]  # p-value
+) %>% arrange(desc(grupo))  # Ordenar poniendo "Tratadas" primero
+
+
+
+```
+
+
+## IPWT
+
+creamos la base de datos para los análisis:
+```{r}
+
+vars = c('age','country','exclusion_risk',"m_smoking","m_alcohol","m_drug_abuse","m_diabetes","obesity_final","m_lipid",'m_depression',
+         'm_anxiety',"m_psychotic",'hipertension_post','prev_aborto')
+#la depresión y la epilepsia también salían importantes para separar tratadas de no tratadas
+
+gaia_embarazos_disp_ten_hiper_inter <- gaia_embarazos_disp_ten_hiper  %>%
+  mutate(exclusion_risk = relevel(factor(exclusion_risk), ref = "not at risk")) #para que coj acomo referncia el not ar risk
+
+# Seleccionar datos y asegurarse que las variables estén en formato correcto
+ps_data <- gaia_embarazos_disp_ten_hiper_inter %>%
+  select(embarazo_id,abortion,tratadas_p1, all_of(vars)) %>%
+  distinct(embarazo_id, .keep_all = TRUE)  #elimina duplicados embarazo (se queda con el primeor)
+
+
+formula_ajustada <- as.formula(paste("abortion ~ tratadas_p1 +", paste(vars, collapse = " + ")))
+```
+
+
+
+Cálculo de propensity scores:
+```{r}
+modelo_ps <- glm(tratadas_p1 ~ ., data = ps_data %>% select(-embarazo_id,-abortion), family = binomial)
+
+# Calcular propensity scores
+ps_data$pscore <- predict(modelo_ps, type = "response")
+
+summary(modelo_ps)
+```
+
+
+
+```{r}
+
+ggplot(ps_data, aes(x = pscore, fill = as.factor(tratadas_p1))) +
+  geom_density(alpha = 0.4) +
+  scale_fill_manual(values = c("steelblue", "firebrick")) +
+  labs(
+    title = "Distribución del Propensity Score por Grupo de tratadas",
+    x = "Propensity Score",
+    y = "Densidad",
+    fill = "tratadas_p1"
+  ) +
+  theme_minimal()
+
+```
+
+
+Pesos estabilizados
+```{r}
+# Proporción global de tratados y no tratados
+p_tratado <- mean(ps_data$tratadas_p1 == 1)
+p_no_tratado <- 1 - p_tratado
+
+# Calcular peso estabilizado
+ps_data <- ps_data %>%
+  mutate(
+    weight_iptw = case_when(
+      tratadas_p1 == 1 ~ p_tratado / pscore,
+      tratadas_p1 == 0 ~ p_no_tratado / (1 - pscore)
+    )
+  )
+
+```
+
+Diferencias:
+```{r}
+
+# Crear diseño con pesos IPTW
+design_ps <- svydesign(ids = ~1, data = ps_data, weights = ~weight_iptw)
+
+# Tabla sin ponderar
+tabla_sin_peso <- CreateTableOne(vars, strata = "tratadas_p1", data = ps_data, test = FALSE)
+
+# Tabla ponderada con IPTW
+tabla_con_peso <- svyCreateTableOne(vars, strata = "tratadas_p1", data = design_ps, test = FALSE)
+
+# Mostrar tablas con SMD
+print(tabla_sin_peso, smd = TRUE)
+print(tabla_con_peso, smd = TRUE)
+
+```
+
+
+Con peso:
+```{r}
+# Calcular riesgos con pesos
+riesgos_ponderados <- ps_data %>%
+  group_by(tratadas_p1) %>%
+  summarise(
+    total_ponderado = sum(weight_iptw), # Total ponderado
+    casos_cong_ponderados = sum(weight_iptw * abortion), # Casos ponderados
+    riesgo_absoluto_ponderado = casos_cong_ponderados / total_ponderado # Riesgo absoluto ponderado
+  )
+
+print(riesgos_ponderados)
+
+# Crear tabla de contingencia ponderada
+library(survey)
+
+# Crear diseño con pesos
+design_ps <- svydesign(ids = ~1, data = ps_data, weights = ~weight_iptw)
+
+# Tabla de contingencia ponderada
+tabla_cont_ponderada <- svytable(~tratadas_p1 + abortion, design = design_ps)
+print(tabla_cont_ponderada)
+
+# Calcular RR e IC del 95% ponderado
+rr_ponderado <- riskratio(tabla_cont_ponderada)
+print(rr_ponderado)
+
+```
+
+Con peso y ajustado:
+```{r}
+formula_ajustada <- as.formula(paste("abortion ~ tratadas_p1 +", paste(vars, collapse = " + ")))
+
+# Ajustar el modelo usando la fórmula
+modelo_ajustado <- glm(formula_ajustada, data = ps_data, weights = ps_data$weight_iptw, family = binomial)
+
+# Resumen del modelo ajustado
+summary(modelo_ajustado)
+```
+
+
+```{r}
+# Cargar librería necesaria
+library(broom)
+library(knitr)
+library(dplyr)
+
+# Extraer coeficientes del modelo ajustado
+resultado_or <- tidy(modelo_ajustado, exponentiate = TRUE, conf.int = TRUE)
+
+# Filtrar solo la variable "tratadas_p1"
+resultado_tratadas <- resultado_or %>% filter(term == "tratadas_p1")
+
+# Redondear a dos decimales
+resultado_tratadas <- resultado_tratadas %>%
+  mutate(across(where(is.numeric), round, 2))
+
+# Extraer OR e IC como texto
+or_ic95 <- paste0(resultado_tratadas$estimate, " (", resultado_tratadas$conf.low, " - ", resultado_tratadas$conf.high, ")")
+
+# Crear tabla con solo dos filas (una por grupo)
+tabla_modelo_iptw_tension <- ps_data %>% 
+  group_by(tratadas_p1) %>% 
+  summarise(
+    n       = sum(weight_iptw),                 # Tamaño efectivo (puede ser decimal)
+    casos  = sum(weight_iptw * abortion),      # Abortos ponderados
+    tasa    = round(casos / n, 4) # Riesgo ponderado
+  ) %>% 
+  mutate(
+    grupo   = if_else(tratadas_p1 == 1, "Tratadas", "No Tratadas"),
+    OR_IC95 = if_else(grupo == "Tratadas", or_ic95, "-") # Solo mostramos OR para tratadas
+  )%>%  
+  arrange(desc(tratadas_p1)) %>% 
+  select(grupo, n, casos, tasa, OR_IC95) 
+
+# Agregar columna de OR solo para "Tratadas"
+tabla_modelo_iptw_tension <- tabla_modelo_iptw_tension %>%
+  mutate(OR_IC95 = ifelse(grupo == "Tratadas", or_ic95, "-"))
+
+```
+```{r}
+probabilidades <- predict(modelo_ajustado, type = "response")
+
+
+roc_obj <- roc(ps_data$abortion, probabilidades)
+
+
+plot(roc_obj, col = "#1c61b6", lwd = 2, main = "Curva ROC para modelo ajustado")
+abline(a = 0, b = 1, lty = 2, col = "gray")  
+
+
+auc(roc_obj)
+```
+
+# utilizando IMC
+## ajustamos
+
+### RR:
+Para abortos:
+```{r}
+#gaia_embarazos_hiper_comp = gaia_embarazos_hiper_comp %>% filter(imputado==0)
+```
+
+```{r}
+tabla <- gaia_embarazos_hiper_comp %>%
+  group_by(embarazo_id) %>%
+  summarise(
+    tipo_fin = first(tipo_fin),
+    tratadas_p1 = first(tratadas_p1)
+  )
+
+tabla <- tabla %>%
+  mutate(
+    aborto_espontaneo = ifelse(tipo_fin == "spontaneous abortion", 1, 0),
+    tratadas_p1 = as.factor(tratadas_p1)
+  )
+
+riesgos <- tabla %>%
+  group_by(tratadas_p1) %>%
+  summarise(
+    total = n(),
+    casos_aborto = sum(aborto_espontaneo),
+    riesgo_absoluto = casos_aborto / total
+  )
+
+print(riesgos)
+```
+
+```{r}
+# Crear tabla de contingencia
+# Crear tabla de contingencia
+tabla_cont <- table(tabla$tratadas_p1, tabla$aborto_espontaneo)
+
+# Cargar librería
+library(epitools)
+
+# Calcular RR e IC del 95%
+rr_resultado <- riskratio(tabla_cont)
+
+# Convertir el resultado en un data frame
+general <- as.data.frame(rr_resultado$measure)[2, ]  # Fila 2 contiene el RR para el grupo tratado
+p_value <- as.data.frame(rr_resultado$p.value)[2, ]  # Fila 2 contiene el p-value para el grupo tratado
+
+# Unir ambas en una sola tabla
+general <- cbind(general, p_value)
+
+# Mostrar tabla ajustada
+print(general)
+```
+
+creamos la base de datos para los análisis:
+```{r}
+vars=c('age','country','exclusion_risk',"m_smoking","m_alcohol","m_drug_abuse","m_diabetes","value_imc","m_lipid",'m_depression',
+         'm_anxiety',"m_psychotic",'prev_aborto')
+
+#la depresión y la epilepsia también salían importantes para separar tratadas de no tratadas
+
+gaia_embarazos_hiper_comp_inter <- gaia_embarazos_hiper_comp  %>%
+  mutate(exclusion_risk = relevel(factor(exclusion_risk), ref = "not at risk")) #para que coj acomo referncia el not ar risk
+
+# Seleccionar datos y asegurarse que las variables estén en formato correcto
+ps_data <- gaia_embarazos_hiper_comp_inter %>%
+  select(embarazo_id,abortion,tratadas_p1, all_of(vars)) %>%
+  distinct(embarazo_id, .keep_all = TRUE)  #elimina duplicados embarazo (se queda con el primeor)
+
+
+
+formula_ajustada <- as.formula(paste("abortion ~ tratadas_p1 +", paste(vars, collapse = " + ")))
+
+```
+
+
+Cálculo de propensity scores para anomalías congénitas:
+```{r}
+modelo_ps <- glm(tratadas_p1 ~ ., data = ps_data %>% select(-embarazo_id,-abortion), family = binomial)
+
+# Calcular propensity scores
+ps_data$pscore <- predict(modelo_ps, type = "response")
+
+summary(modelo_ps)
+```
+
+
+
+```{r}
+
+ggplot(ps_data, aes(x = pscore, fill = as.factor(tratadas_p1))) +
+  geom_density(alpha = 0.4) +
+  scale_fill_manual(values = c("steelblue", "firebrick")) +
+  labs(
+    title = "Distribución del Propensity Score por Grupo de tratadas",
+    x = "Propensity Score",
+    y = "Densidad",
+    fill = "tratadas_p1"
+  ) +
+  theme_minimal()
+
+```
+Solapamiento = para cada individuo del grupo con malformaciones, hay uno comparable sin malformaciones con un propensity similar.
+Entonces, el emparejamiento es posible y fiable.
+
+
+Pesos estabilizados:
+```{r}
+# Proporción global de tratados y no tratados
+p_tratado <- mean(ps_data$tratadas_p1 == 1)
+p_no_tratado <- 1 - p_tratado
+
+# Calcular peso estabilizado
+ps_data <- ps_data %>%
+  mutate(
+    weight_iptw = case_when(
+      tratadas_p1 == 1 ~ p_tratado / pscore,
+      tratadas_p1 == 0 ~ p_no_tratado / (1 - pscore)
+    )
+  )
+
+```
+
+Diferencias 
+```{r}
+library(tableone)
+library(survey)
+
+
+
+# Crear diseño con pesos IPTW
+design_ps <- svydesign(ids = ~1, data = ps_data, weights = ~weight_iptw)
+
+# Tabla sin ponderar
+tabla_sin_peso <- CreateTableOne(vars, strata = "tratadas_p1", data = ps_data, test = FALSE)
+
+# Tabla ponderada con IPTW
+tabla_con_peso <- svyCreateTableOne(vars, strata = "tratadas_p1", data = design_ps, test = FALSE)
+
+# Mostrar tablas con SMD
+print(tabla_sin_peso, smd = TRUE)
+print(tabla_con_peso, smd = TRUE)
+
+```
+
+## congénitas con peso
+```{r}
+# Calcular riesgos con pesos
+riesgos_ponderados <- ps_data %>%
+  group_by(tratadas_p1) %>%
+  summarise(
+    total_ponderado = sum(weight_iptw), # Total ponderado
+    casos_cong_ponderados = sum(weight_iptw * abortion), # Casos ponderados
+    riesgo_absoluto_ponderado = casos_cong_ponderados / total_ponderado # Riesgo absoluto ponderado
+  )
+
+print(riesgos_ponderados)
+
+# Crear tabla de contingencia ponderada
+library(survey)
+
+# Crear diseño con pesos
+design_ps <- svydesign(ids = ~1, data = ps_data, weights = ~weight_iptw)
+
+# Tabla de contingencia ponderada
+tabla_cont_ponderada <- svytable(~tratadas_p1 + abortion, design = design_ps)
+print(tabla_cont_ponderada)
+
+# Calcular RR e IC del 95% ponderado
+rr_ponderado <- riskratio(tabla_cont_ponderada)
+print(rr_ponderado)
+
+```
+```{r}
+formula_ajustada <- as.formula(paste("abortion ~ tratadas_p1 +", paste(vars, collapse = " + ")))
+
+# Ajustar el modelo usando la fórmula
+modelo_ajustado <- glm(formula_ajustada, data = ps_data, weights = ps_data$weight_iptw, family = binomial)
+
+# Resumen del modelo ajustado
+summary(modelo_ajustado)
+```
+```{r}
+# Cargar librería necesaria
+library(broom)
+library(knitr)
+library(dplyr)
+
+# Extraer coeficientes del modelo ajustado
+resultado_or <- tidy(modelo_ajustado, exponentiate = TRUE, conf.int = TRUE)
+
+# Filtrar solo la variable "tratadas_p1"
+resultado_tratadas <- resultado_or %>% filter(term == "tratadas_p1")
+
+# Redondear a dos decimales
+resultado_tratadas <- resultado_tratadas %>%
+  mutate(across(where(is.numeric), round, 2))
+
+# Extraer OR e IC como texto
+or_ic95 <- paste0(resultado_tratadas$estimate, " (", resultado_tratadas$conf.low, " - ", resultado_tratadas$conf.high, ")")
+
+# Crear tabla con solo dos filas (una por grupo)
+tabla_modelo_iptw_IMC <- ps_data %>% 
+  group_by(tratadas_p1) %>% 
+  summarise(
+    n       = sum(weight_iptw),                 # Tamaño efectivo (puede ser decimal)
+    casos  = sum(weight_iptw * abortion),      # Abortos ponderados
+    tasa    = round(casos / n, 4) # Riesgo ponderado
+  ) %>% 
+  mutate(
+    grupo   = if_else(tratadas_p1 == 1, "Tratadas", "No Tratadas"),
+    OR_IC95 = if_else(grupo == "Tratadas", or_ic95, "-") # Solo mostramos OR para tratadas
+  )%>%  
+  arrange(desc(tratadas_p1)) %>% 
+  select(grupo, n, casos, tasa, OR_IC95) 
+
+# Agregar columna de OR solo para "Tratadas"
+tabla_modelo_iptw_IMC <- tabla_modelo_iptw_IMC %>%
+  mutate(OR_IC95 = ifelse(grupo == "Tratadas", or_ic95, "-"))
+
+```
+
+
+
+
+TABLAS BUENAS: 
+```{r}
+tabla_final <- tabla_final %>%
+  mutate(OR_IC95 = ifelse(grupo == "No Tratadas", "-", OR_IC95))%>% mutate(metodo = "Crudo")
+tabla_modelo_iptw = tabla_modelo_iptw %>% select(grupo, n , casos, tasa, OR_IC95)%>% mutate(metodo = "IPTW")
+tabla_modelo_match = tabla_modelo_match %>% select(grupo, n , casos, tasa, OR_IC95)%>% mutate(metodo = "PS Matching")
+
+tabla_comparativa <- bind_rows(
+  tabla_final,
+  tabla_modelo_iptw,
+  tabla_modelo_match 
+) # Ordenar para poner "Tratadas" primero
+
+# Presentar la tabla con formato mejorado
+```
+
+```{r}
+library(dplyr)
+library(knitr)
+library(kableExtra)
+
+# Ordenamos para que aparezcan las tratadas primero dentro de cada método
+tabla_comparativa <- tabla_comparativa %>%
+  mutate(
+    n     = round(n, 0),
+    casos  = round(casos, 0),
+    tasa  = formatC(round(tasa, 2), format = "f", digits = 2),  # fuerza dos decimales
+    OR_IC95 = ifelse(
+      !is.na(OR_IC95) & grepl("^\\d+(\\.\\d)?\\s?\\(", OR_IC95),  # busca si solo hay un decimal
+      sub("^(\\d+\\.\\d)(\\s?\\()", "\\10\\2", OR_IC95),  # añade un 0 si hace falta
+      OR_IC95
+    ),
+    OR_IC95 = ifelse(is.na(OR_IC95) | OR_IC95 == "-", "Ref.", OR_IC95),
+    
+    grupo = case_when(
+      grupo == 1 ~ "Tratadas",
+      is.na(grupo) ~ "No Tratadas",
+      TRUE ~ grupo
+    )
+  ) %>%
+  select(metodo, grupo, n, casos, tasa, OR_IC95) %>%
+  arrange(factor(metodo, levels = c("Crudo", "IPTW", "PS Matching")), desc(grupo))%>%
+  arrange(metodo, desc(grupo)) %>%
+  group_by(metodo) %>%
+  mutate(metodo = ifelse(row_number() == 1, as.character(metodo), "")) %>%
+  ungroup()
+
+# Crear tabla con formato mejorado
+tabla_comparativa %>%
+  kable(
+    format = "html",  # o "latex" si estás en PDF
+    caption = "Comparación de Métodos para Odds Ratio en el riesgo de aborto espontáneo",
+    col.names = c("Método", "Grupo", "N", "Casos", "Proporción", "OR (IC 95%)"),
+    align = "lccccl"
+  ) %>%
+  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover")) %>%collapse_rows(columns = 1, valign = "top")
+
+```
+
+análisis secundarios:
+```{r}
+tabla_final_sub <- tabla_final_sub %>%
+  mutate(OR_IC95 = ifelse(grupo == "No Tratadas", "-", OR_IC95))%>% mutate(metodo = "Crudo con medidas T.A.*")
+tabla_modelo_iptw_tension = tabla_modelo_iptw_tension %>% select(grupo, n , casos, tasa, OR_IC95)%>% mutate(metodo = "IPTW con medidas T.A.*")
+tabla_modelo_iptw_IMC = tabla_modelo_iptw_IMC %>% select(grupo, n , casos, tasa, OR_IC95)%>% mutate(metodo = "IPTW con IMC")
+
+tabla_comparativa1 <- bind_rows(
+  tabla_final_sub ,
+  tabla_modelo_iptw_tension ,
+  tabla_modelo_iptw_IMC 
+) # Ordenar para poner "Tratadas" primero
+
+# Presentar la tabla con formato mejorado
+```
+
+```{r}
+library(dplyr)
+library(knitr)
+library(kableExtra)
+
+# Ordenamos para que aparezcan las tratadas primero dentro de cada método
+tabla_comparativa1 <- tabla_comparativa1 %>%
+   mutate(
+    n     = round(n, 0),
+    casos  = round(casos, 0),
+    tasa  = formatC(round(tasa, 2), format = "f", digits = 2),  # fuerza dos decimales
+    OR_IC95 = ifelse(
+      !is.na(OR_IC95) & grepl("^\\d+(\\.\\d)?\\s?\\(", OR_IC95),  # busca si solo hay un decimal
+      sub("^(\\d+\\.\\d)(\\s?\\()", "\\10\\2", OR_IC95),  # añade un 0 si hace falta
+      OR_IC95
+    ),
+    OR_IC95 = ifelse(is.na(OR_IC95) | OR_IC95 == "-", "Ref.", OR_IC95),
+    grupo = case_when(
+      grupo == 1 ~ "Tratadas",
+      is.na(grupo) ~ "No Tratadas",
+      TRUE ~ grupo
+    )
+  ) %>%
+  select(metodo, grupo, n, casos, tasa, OR_IC95) %>%  # Seleccionar columnas
+  arrange(factor(metodo, levels = c("IPTW con IMC", "Crudo con medidas T.A.*", "IPTW con medidas T.A.*")), desc(grupo)) %>%
+  group_by(metodo) %>%
+  mutate(metodo = ifelse(row_number() == 1, as.character(metodo), "")) %>%
+  ungroup()  
+# Crear tabla con formato mejorado
+tabla_comparativa1 %>%
+  kable(
+    format = "html",
+    caption = "Comparación de Métodos para Odds Ratio en el riesgo de aborto espontáneo",
+    col.names = c("Método", "Grupo", "N", "Casos", "Tasa", "OR (IC 95%)"),
+    align = "lccccl"
+  ) %>%
+  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover")) %>%
+  collapse_rows(columns = 1, valign = "top")  
+
+```
+```{r}
+todo <- bind_rows(tabla_modelo_iptw_tension,tabla_final_sub,tabla_modelo_iptw_IMC,tabla_modelo_match,tabla_modelo_iptw,tabla_final)
+         
+## ---------------------------------------------------------------
+## 2. Nos quedamos solo con la fila 'Tratadas'
+## ---------------------------------------------------------------
+tratadas <- todo %>% 
+  filter(grupo == "Tratadas")
+
+## ---------------------------------------------------------------
+## 3. Separamos OR, límite inferior y superior
+##    Ejemplo de cadena:  "0.96 (0.86 - 1.07)"
+## ---------------------------------------------------------------
+tratadas <- tratadas %>% 
+  mutate(
+    OR   = as.numeric(str_extract(OR_IC95, "^[0-9.]+")),
+    LCI  = as.numeric(str_extract(OR_IC95, "(?<=\\().+?(?=\\s-)" )),
+    UCI  = as.numeric(str_extract(OR_IC95, "(?<=-\\s).+(?=\\))"))
+  )
+
+
+
+lim_inf <- min(tratadas$LCI, na.rm = TRUE) * 0.8   # un 20 % por debajo
+lim_sup <- max(tratadas$UCI, na.rm = TRUE) * 1.2   # un 20 % por encima
+
+tratadas <- tratadas %>%
+  mutate(
+    orden = case_when(
+      metodo == "Crudo" ~ 6,
+      metodo == "IPTW" ~ 5,
+      metodo == "PS Matching" ~ 4,
+      metodo == "IPTW con IMC" ~ 3,
+      metodo == "Crudo con medidas T.A.*" ~ 2,
+      metodo == "IPTW con medidas T.A.*" ~ 1,
+      TRUE ~ NA_integer_  # Para evitar errores si hay valores inesperados
+    )
+  )
+
+ggplot(tratadas, aes(x = OR, y = orden)) +
+  geom_vline(xintercept = 1, linetype = 2, colour = "grey50") +
+  geom_errorbarh(aes(xmin = LCI, xmax = UCI), height = .25) +
+  geom_point(size = 3) +
+  scale_x_log10(
+    limits = c(lim_inf, lim_sup),
+    breaks = log_breaks(n = 6),
+    labels = label_number(accuracy = 0.01)
+  ) +
+  scale_y_continuous(
+    breaks = tratadas$orden,
+    labels = tratadas$metodo  # Asignar etiquetas de 'metodo' a los valores de 'orden'
+  ) +
+  xlab("Odds Ratio IC(95%)") +
+  ylab("Método")  +
+  scale_x_continuous(
+    limits = c(0.5, 1.5),  # Ajustando el límite superior a 1.5
+    breaks = c(0.7, 0.8, 0.9, 1, 1.1, 1.2,1.3,1.4,1.5),  # Incluir valores mayores a 1
+    labels = label_number(accuracy = 0.01)) +
+  ggtitle("") +
+  theme_minimal() +
+  theme(
+    axis.text.y = element_text(size = 10),
+    plot.title = element_text(hjust = .5, face = "bold")
+  )
+
+```
+
+
