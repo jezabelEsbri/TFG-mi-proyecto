@@ -1,0 +1,2186 @@
+---
+title: "PREGVAL cohort profile with 6m of lookback"
+author: "Francisco Sanchez-Saez"
+date: "last-modified" 
+editor: source
+format:
+  html:
+    toc: true
+    toc-location: left
+    theme: cerulean
+    css: style.css
+    embed-resources: true
+    number-sections: true
+---
+
+```{r}
+#| echo: false
+source("_common.R")
+knitr::opts_chunk$set(
+  eval = TRUE,
+  echo = FALSE
+)
+
+```
+
+```{r }
+#| include: false
+# load libraries and functions-----------------------------------------------
+source(file.path("..", "scripts", "Librerias.R"))
+source(file.path("..", "scripts", "Funciones.R"))
+conflicted::conflicts_prefer(purrr::compose)
+library(fuzzyjoin)
+
+```
+
+```{css, echo = FALSE}
+.output {
+max-height: 500px;
+overflow-y: scroll;
+}
+
+```
+
+# Load data
+
+```{r}
+# load pathes----------------------------------------------------------------
+brutos      <- file.path( "r:", "PREGVAL", "1-DATOS", 
+                          "1-BRUTOS")
+intermedios <- file.path( "r:", "PREGVAL", "1-DATOS", 
+                          "2-INTERMEDIOS")
+procesados  <- file.path( "r:", "PREGVAL", "1-DATOS", 
+                          "3-PROCESADOS")
+
+```
+
+```{r}
+# load pregnancies-----------------------------------------------------------
+pregnancies_cohort_sip <- readRDS(file.path(procesados, "pregnancy_algorithm",
+                                      "pregnancies_cohort_sip.RDS")) 
+
+sips_pregnancies_cohort <- readRDS(file.path(procesados, "sips",
+                                         "sips_pregnancies_cohort.RDS"))
+
+```
+
+# Study period
+
+```{r}
+# check population-----------------------------------------------------------
+sips_all <- readRDS(file.path(procesados, "sips", "sips_all.RDS"))
+sips_clean <- readRDS(file.path(procesados, "sips", "sips_clean.RDS"))
+
+# filter study period--------------------------------------------------------
+pregnancies_cohort_00 <- pregnancies_cohort_sip |> 
+  # filter from sip
+  tidylog::filter(sip %in% sips_all) |> 
+  # filter from sip
+  tidylog::filter(sip %in% sips_clean) 
+  
+```
+
+# Risk of exclusion and birthdate
+
+```{r}
+# obtain exclusion_risk and birthdate----------------------------------------
+pregnancies_cohort_0 <- pregnancies_cohort_sip |> 
+  mutate(year = year(fecha_inicio)) |> 
+  mutate(exclusion_risk = case_when(
+    exclusion_risk_0 == 0 ~ "not at risk",
+    exclusion_risk_0 == 1 ~ "at risk",
+    exclusion_risk_0 == 2 ~ "at risk",
+    exclusion_risk_0 == 3 ~ "at risk",
+    exclusion_risk_0 == 4 ~ "at risk",
+    exclusion_risk_0 == 5 ~ "at risk",
+    exclusion_risk_0 == 6 ~ "at risk",
+    exclusion_risk_0 == 7 ~ "at risk",
+    is.na(exclusion_risk_0) ~ "no information available",
+    T ~ "no information available") |> factor(levels = c(
+      "not at risk", "at risk", "no information available")))
+
+```
+
+## Age
+
+```{r}
+# add age--------------------------------------------------------------------
+pregnancies_cohort_0b <- pregnancies_cohort_0 |> 
+  mutate(age = as.numeric(difftime(fecha_inicio, fecha_nacimiento)/365.25))
+
+pregnancies_cohort_0b |> tidylog::filter(is.na(fecha_nacimiento))
+
+pregnancies_cohort_0b |> summarise(
+  mean_age = mean(age, na.rm = TRUE),
+  sd_age = sd(age, na.rm = TRUE)
+  )
+
+# create cuts of age <=25, 26-35, > 35
+pregnancies_cohort_0b |> 
+  mutate(age_group = case_when(
+    age < 26 ~ "<= 25",
+    age >= 26 & age < 36 ~ "26-35",
+    age >= 36 ~ "> 35",
+    T ~ "<= 25") |> factor(levels = c("<= 25", "26-35", "> 35"))) |>  
+  tabyl(age_group)
+
+```
+
+
+## pais de origen
+
+```{r}
+# country--------------------------------------------------------------------
+pregnancies_cohort_1 <- pregnancies_cohort_0b |> 
+    mutate(cod_country = str_sub(pais_nacimiento, 1, 3)) |>  
+  mutate(country = case_when(
+           cod_country == "108" ~ "Spain",
+           cod_country != "108" & cod_country >= "102" & 
+             cod_country < "133" ~ "Europe",
+           cod_country >= "135" & cod_country < "999" ~ "Other",
+           T ~ "Unknown")) |> 
+  mutate(country = factor(country, 
+                   levels = c("Spain", "Europe", "Other", "Unknown")))
+
+pregnancies_cohort_1 |> tabyl(country) 
+
+```
+
+## Income
+
+```{r}
+# Income---------------------------------------------------------------------
+# check rafs_primer
+pregnancies_cohort_1 |> tabyl(raf_ipago_primer, raf_ilimi_primer)
+
+# obtain exclusion_risk table
+pregnancies_cohort_1b <- pregnancies_cohort_1 |> 
+  mutate(raf_ipago2 = if_else(raf_ipago == "", 
+                             raf_ipago_primer, raf_ipago),
+         raf_ilimi2 = if_else(is.na(raf_ilimi),
+                             raf_ilimi_primer, raf_ilimi))
+
+pregnancies_cohort_1b |> count(raf_ilimi2)
+pregnancies_cohort_1b |> count(raf_ipago2)
+
+pregnancies_cohort_1b |> 
+  mutate(income = case_when(
+    raf_ipago2 == "TSI 000" ~ "Unknown",
+    raf_ipago2 == "TSI 001" ~ "No income", 
+    raf_ipago2 == "TSI 002" & raf_ilimi2 == "0" ~ "No income", 
+    raf_ipago2 == "TSI 002" & raf_ilimi2 == "1" ~ "<18,000",
+    raf_ipago2 == "TSI 002" & raf_ilimi2 == "2" ~ "18,000-100,000",
+    raf_ipago2 == "TSI 003" ~ "<18,000",
+    raf_ipago2 == "TSI 004" ~ "18,000-100,000",
+    raf_ipago2 == "TSI 005" ~ ">100,000",
+    T ~ "Unknown") |> factor(levels = c("Unknown", "No income", "<18,000", 
+                                       "18,000-100,000", ">100,000"))) |> 
+  tabyl(income)
+
+```
+
+# Define Comorbidities
+
+```{r}
+# Load aux bases-------------------------------------------------------------
+# solve conflicts
+conflicted::conflicts_prefer(lubridate::is.Date)
+# Load events----------------------------------------------------------------
+events <- fread2(file.path(procesados, "Target_tables_algorithm", "Big_files",
+                "EVENTS.csv")) |>
+  filter(person_id %in% sips_pregnancies_cohort)
+
+# Load diagnoses-------------------------------------------------------------
+ diagnoses <- fread2(file.path(procesados, "diagnoses.csv")) |>
+   filter(sip %in% sips_pregnancies_cohort)
+
+```
+
+
+## Gestational diabetes 
+
+```{r}
+# Gestational diabetes-------------------------------------------------------
+cod_gest_diabetes_icd9 <- c(
+   "648.8" # 648.8*
+   )
+cod_gest_diabetes_icd10 <- c(
+   "O24.4", # O24.4*
+   "O99.81" # O99.81*
+   )
+
+cod_gest_diabetes <- str_c("^", 
+                     c(cod_gest_diabetes_icd9, cod_gest_diabetes_icd10))
+
+```
+
+## Gestational Hypertension 
+
+```{r}
+# Gestational hypertension---------------------------------------------------
+cod_gest_hypertension_icd9 <- c(
+   "642.3" # 642.3*
+   )
+cod_gest_hypertension_icd10 <- c(
+   "O13" # O13.** 
+   )
+
+cod_gest_hypertension <- str_c("^", 
+                c(cod_gest_hypertension_icd9, cod_gest_hypertension_icd10))
+
+```
+
+## Preeclampsia
+
+```{r}
+# Preeclampsia---------------------------------------------------------------
+cod_preeclampsia_icd9 <- c(
+   "642.4", # 642.4*
+   "642.5", # 642.5*
+   "642.6", # 642.6*
+   "642.7" # 642.7*
+   )
+cod_preeclampsia_icd10 <- c(
+   "O11", # O11.** 
+   "O14", # O14.** 
+   "O15" # O15.** 
+   )
+
+cod_preeclampsia <- str_c("^", 
+                c(cod_preeclampsia_icd9, cod_preeclampsia_icd10))
+
+```
+
+## Smoking
+
+```{r}
+# Smoking---------------------------------------------------------------
+cod_smoking_icd9 <- c(
+   "305.1",
+   "649.0",
+   "989.84",
+   "V15.82"
+   )
+cod_smoking_icd10 <- c(
+   "F17", 
+   "T65.2",
+   "Z72.0",
+   "Z87.891",
+   "O99.33"
+   )
+
+cod_smoking <- str_c("^", 
+                c(cod_smoking_icd9, cod_smoking_icd10))
+
+```
+
+## Alcohol
+
+```{r}
+# Alcohol---------------------------------------------------------------
+cod_alcohol_icd9 <- c(
+"291",
+"303",
+"305.0",
+"357.5",
+"425.5",
+"571.0",
+"571.1",
+"571.2",
+"571.3",
+"980.0",
+"E860.0"
+   )
+cod_alcohol_icd10 <- c(
+   "E52",
+   "F10",
+   "G31.2",
+   "G62.1",
+   "G72.1",
+   "I42.6",
+   "K29.2",
+   "K70",
+   "K85.2",
+   "K86.0",
+   "O35.4",
+   "O99.31",
+   "T51.",
+   "Z71.41")
+
+cod_alcohol <- str_c("^", 
+                c(cod_alcohol_icd9, cod_alcohol_icd10))
+
+```
+
+## Sedentary behaviour
+
+```{r}
+# Sedentary---------------------------------------------------------------
+cod_sedentary_icd9 <- c(
+   "V69.0"
+
+   )
+cod_sedentary_icd10 <- c(
+   "Z72.3")
+
+cod_sedentary <- str_c("^", 
+                c(cod_sedentary_icd9, cod_sedentary_icd10))
+
+```
+
+## Drug abuse
+
+```{r}
+# Drug-----------------------------------------------------------------------
+cod_drug_abuse_icd9 <- c(
+"304",
+"305.2",
+"305.3",
+"305.4",
+"305.5",
+"305.6",
+"305.7",
+"305.8",
+"305.9",
+"648.30",
+"655.5"
+   )
+cod_drug_abuse_icd10 <- c(
+"F11",
+"F12",
+"F13",
+"F14",
+"F15",
+"F16",
+"F18",
+"F19",
+"O35.5",
+"O99.32"
+   )
+
+cod_drug_abuse <- str_c("^", 
+                c(cod_drug_abuse_icd9, cod_drug_abuse_icd10))
+
+```
+
+## Hypertension
+
+```{r}
+# Hypertension---------------------------------------------------------------
+cod_hypert_icd9 <- c(
+   "401", "402", "403", "404", "405", 
+   "437.2",
+   "642.0", "642.1", "642.2"
+   )
+cod_hypert_icd10 <- c(
+    "I10", "I11", "I12", "I13", "I15", "I16", "I67.4",
+    "O10"
+    )
+
+cod_hypert <- str_c("^", 
+                     c(cod_hypert_icd9, cod_hypert_icd10))
+
+```
+
+## Congestive heart failure
+
+```{r}
+# CHF------------------------------------------------------------------------
+cod_chf_icd9 <- c(
+"398.91",
+"402.01",
+"402.11",
+"402.91",
+"404.01",
+"404.03",
+"404.11",
+"404.13",
+"404.91",
+"404.93",
+"425.4",
+"428"   )
+
+cod_chf_icd10 <- c(
+"I09.81",
+"I11.0",
+"I13.0",
+"I13.2",
+"I42.0",
+"I50"
+    )
+
+cod_chf <- str_c("^", 
+                     c(cod_chf_icd9, cod_chf_icd10))
+
+```
+
+## Lipid disorders
+
+```{r}
+# lipid----------------------------------------------------------------------
+cod_lipid_icd9 <- c(
+   "272")
+  cod_lipid_icd10 <- c(
+   "E78")
+
+cod_lipid <- str_c("^", 
+                     c(cod_lipid_icd9, cod_lipid_icd10))
+
+```
+
+## Diabetes
+
+```{r}
+# Diabetes-------------------------------------------------------------------
+cod_diabetes_icd9 <- c(
+   "249",  # 249.*
+   "250",  # 250.*
+   "648.01", # 648.01* 
+   "648.03"  # 648.03* 
+   )
+cod_diabetes_icd10 <- c(
+   "E08", # E08.* 
+   "E09", # E09.*
+   "E10", # E10.*
+   "E11", # E11.*
+   "E13",  # E13.*
+   "O24.0", # O24.0*
+   "O24.1", # O24.1*
+   "O24.3" # O24.3*
+   )
+
+cod_diabetes <- str_c("^", 
+                     c(cod_diabetes_icd9, cod_diabetes_icd10))
+
+```
+
+## Depression
+
+```{r}
+# Depression-----------------------------------------------------------------
+cod_depression_icd9 <- c(
+  "296.2", "296.3", "298.0", 
+  "300.4", "301.12", "311"
+  )
+cod_depression_icd10 <- c(
+  "F32", "F33", "F34.1",
+  "F41.8", "F53", "O90.6"
+  )
+
+cod_depression <- str_c("^", 
+                     c(cod_depression_icd9, cod_depression_icd10))
+
+```
+
+## Anxiety
+
+```{r}
+# Anxiety--------------------------------------------------------------------
+cod_anxiety_icd9 <- c(
+  "293.84",
+  "300.0",
+  "300.2"
+  )
+
+cod_anxiety_icd10 <- c(
+  "F06.4",
+  "F40",
+  "F41"
+  )
+
+cod_anxiety <- str_c("^", 
+                     c(cod_anxiety_icd9, cod_anxiety_icd10))
+
+```
+
+## Psychotic disorder
+
+```{r}
+# Psychotic disorder---------------------------------------------------------
+cod_psychotic_icd9 <- c(
+"295",
+"297",
+"298",
+"299")
+
+cod_psychotic_icd10 <- c(
+"F20",
+"F21",
+"F22",
+"F23",
+"F24",
+"F25",
+"F28",
+"F29",
+"F84"
+  )
+
+cod_psychotic <- str_c("^", 
+                     c(cod_psychotic_icd9, cod_psychotic_icd10))
+
+```
+
+## Bipolar
+
+```{r}
+# Bipolar-----------------------------------------------------------------
+cod_bipolar_icd9 <- c(
+"296.0",
+"296.1",
+"296.4",
+"296.5",
+"296.6",
+"296.7",
+"296.80",
+"296.89",
+"296.9"
+  )
+
+cod_bipolar_icd10 <- c(
+  "F30",
+  "F31"
+  )
+
+cod_bipolar <- str_c("^", 
+                     c(cod_bipolar_icd9, cod_bipolar_icd10))
+
+```
+
+
+## Obesity
+
+```{r}
+# Obesity--------------------------------------------------------------------
+cod_obesity_icd9 <- c(
+  "278.00", 
+  "278.01", 
+  "278.03", 
+  "649.1", 
+  "649.2",
+  "V45.86", 
+  "V85.3", 
+  "V85.4"
+  )
+cod_obesity_icd10 <- c(
+  "E66.0", 
+  "E66.1", 
+  "E66.2", 
+  "E66.8", 
+  "E66.9", 
+  "O99.21", 
+  "O99.84",
+  "Z68.3", 
+  "Z68.4",
+  "Z98.84"
+  )
+
+cod_obesity <- str_c("^", 
+                     c(cod_obesity_icd9, cod_obesity_icd10))
+
+```
+
+## Asthma
+
+```{r}
+# Asthma---------------------------------------------------------------------
+cod_asthma_icd9 <- c(
+  "493"
+  )
+cod_asthma_icd10 <- c(
+  "J45"
+  )
+
+cod_asthma <- str_c("^", 
+                     c(cod_asthma_icd9, cod_asthma_icd10))
+
+```
+
+## Epilepsy
+
+```{r}
+# Epilepsy-----------------------------------------------------------------
+cod_epilepsy_icd9 <- c(
+  "345"
+  )
+cod_epilepsy_icd10 <- c(
+  "G40"
+  )
+
+cod_epilepsy <- str_c("^", 
+                     c(cod_epilepsy_icd9, cod_epilepsy_icd10))
+
+```
+
+# Create comorbidities
+
+```{r}
+# function to search comorbidities-------------------------------------------
+buscar_comor <- function (base, 
+                               nombre_comor,
+                               var_cod,
+                               cod_comor) {
+  
+  base |> 
+    mutate({{nombre_comor}} := if_else(if_any(starts_with(var_cod), 
+                                ~str_detect(.x, paste(cod_comor,
+        collapse = "|")) == TRUE), 1, 0)) 
+}
+  
+```
+
+## Gestational diabetes
+
+```{r}
+# create gestational diabetes comorbidity
+events_gest_diabetes <- events |> 
+  buscar_comor(
+    nombre_comor = "m_gest_diabetes",
+    var_cod = "event_code",
+    cod_comor = cod_gest_diabetes) |> 
+  filter(m_gest_diabetes == 1) |> 
+  select(person_id, start_date_record) |> 
+  group_by(person_id) |> 
+  mutate(n_gest_diabetes = 1:n()) |>
+  pivot_wider(
+    names_from = n_gest_diabetes,
+    names_prefix = "gest_diabetes_date_",
+    values_from = start_date_record) |> 
+  ungroup()
+
+pregnancies_cohort_02 <- pregnancies_cohort_1b |> 
+  left_join(events_gest_diabetes, by = c("sip" = "person_id")) |> 
+  mutate(
+    across(starts_with("gest_diabetes_date"), 
+           ~ if_else(between(.x, fecha_inicio %m+% days(140), fecha_fin), 1, 0, 
+                     missing = 0))) |> 
+   mutate(m_gest_diabetes = pmax(
+     gest_diabetes_date_1, 
+     gest_diabetes_date_2, 
+     gest_diabetes_date_3, 
+     gest_diabetes_date_4, 
+     gest_diabetes_date_5, 
+     gest_diabetes_date_6, 
+     gest_diabetes_date_7, 
+     gest_diabetes_date_8, 
+     gest_diabetes_date_9, 
+     gest_diabetes_date_10, 
+     gest_diabetes_date_11, 
+     gest_diabetes_date_12, 
+     gest_diabetes_date_13, 
+     gest_diabetes_date_14, 
+     gest_diabetes_date_15, 
+     gest_diabetes_date_16, 
+     gest_diabetes_date_17, 
+     gest_diabetes_date_18, 
+     gest_diabetes_date_19, 
+     gest_diabetes_date_20, 
+     gest_diabetes_date_21, 
+     gest_diabetes_date_22, 
+     gest_diabetes_date_23, 
+     gest_diabetes_date_24, 
+     gest_diabetes_date_25, 
+     gest_diabetes_date_26, 
+     gest_diabetes_date_27, 
+     gest_diabetes_date_28, 
+     gest_diabetes_date_29, 
+     gest_diabetes_date_30, 
+     gest_diabetes_date_31, 
+     gest_diabetes_date_32, 
+     gest_diabetes_date_33, 
+     gest_diabetes_date_34, 
+     gest_diabetes_date_35, 
+     gest_diabetes_date_36, 
+     gest_diabetes_date_37, 
+     gest_diabetes_date_38, 
+     gest_diabetes_date_39, 
+     gest_diabetes_date_40, 
+     gest_diabetes_date_41, 
+     gest_diabetes_date_42, 
+     gest_diabetes_date_43, 
+     gest_diabetes_date_44, 
+     gest_diabetes_date_45, 
+     gest_diabetes_date_46, 
+     gest_diabetes_date_47, 
+     gest_diabetes_date_48, 
+     gest_diabetes_date_49, 
+     gest_diabetes_date_50, 
+     gest_diabetes_date_51, 
+     gest_diabetes_date_52, 
+     gest_diabetes_date_53, 
+     gest_diabetes_date_54, 
+     gest_diabetes_date_55, 
+     gest_diabetes_date_56, 
+     gest_diabetes_date_57, 
+     gest_diabetes_date_58, 
+     gest_diabetes_date_59, 
+     gest_diabetes_date_60, 
+     gest_diabetes_date_61, 
+     gest_diabetes_date_62, 
+     gest_diabetes_date_63, 
+     gest_diabetes_date_64, 
+     gest_diabetes_date_65, 
+                                 na.rm = TRUE)) |> 
+  select(-c(gest_diabetes_date_1:gest_diabetes_date_65))
+  
+pregnancies_cohort_02 |> 
+   tabyl(m_gest_diabetes)
+
+```
+
+## Gestational hypertension
+
+```{r}
+# create gestational diabetes comorbidity
+events_gest_ht <- events |> 
+  buscar_comor(
+    nombre_comor = "m_gest_hypertension",
+    var_cod = "event_code",
+    cod_comor = cod_gest_hypertension) |> 
+  filter(m_gest_hypertension == 1) |> 
+  select(person_id, start_date_record) |> 
+  group_by(person_id) |> 
+  mutate(n_gest_hypertension = 1:n()) |>
+  pivot_wider(
+    names_from = n_gest_hypertension,
+    names_prefix = "gest_hypertension_date_",
+    values_from = start_date_record) |> 
+  ungroup()
+
+pregnancies_cohort_03 <- pregnancies_cohort_02 |> 
+  left_join(events_gest_ht, by = c("sip" = "person_id")) |> 
+  mutate(
+    across(starts_with("gest_hypertension_date_"), 
+           ~ if_else(between(.x, fecha_inicio %m+% days(140), fecha_fin), 1, 0, 
+                     missing = 0))) |> 
+   mutate(m_gest_hypertension = pmax(
+     gest_hypertension_date_1, 
+     gest_hypertension_date_2, 
+     gest_hypertension_date_3, 
+     gest_hypertension_date_4, 
+     gest_hypertension_date_5, 
+     gest_hypertension_date_6, 
+     gest_hypertension_date_7, 
+     gest_hypertension_date_8, 
+     gest_hypertension_date_9, 
+     gest_hypertension_date_10, 
+     gest_hypertension_date_11, 
+     gest_hypertension_date_12, 
+     gest_hypertension_date_13, 
+     gest_hypertension_date_14, 
+     gest_hypertension_date_15, 
+     gest_hypertension_date_16, 
+     gest_hypertension_date_17, 
+     gest_hypertension_date_18, 
+     gest_hypertension_date_19, 
+     gest_hypertension_date_20, 
+     gest_hypertension_date_21, 
+     gest_hypertension_date_22, 
+     gest_hypertension_date_23, 
+     gest_hypertension_date_24, 
+     gest_hypertension_date_25, 
+     gest_hypertension_date_26, 
+     gest_hypertension_date_27, 
+     gest_hypertension_date_28, 
+     gest_hypertension_date_29, 
+     gest_hypertension_date_30, 
+     gest_hypertension_date_31, 
+     gest_hypertension_date_32, 
+     gest_hypertension_date_33, 
+     gest_hypertension_date_34, 
+     gest_hypertension_date_35, 
+     gest_hypertension_date_36, 
+     gest_hypertension_date_37, 
+     gest_hypertension_date_38, 
+     gest_hypertension_date_39, 
+     gest_hypertension_date_40, 
+     gest_hypertension_date_41, 
+     gest_hypertension_date_42, 
+     gest_hypertension_date_43, 
+     gest_hypertension_date_44, 
+     gest_hypertension_date_45, 
+     gest_hypertension_date_46, 
+     gest_hypertension_date_47, 
+     gest_hypertension_date_48,
+                                 na.rm = TRUE)) |> 
+  select(-c(gest_hypertension_date_1:gest_hypertension_date_48))
+  
+pregnancies_cohort_03 |> 
+   tabyl(m_gest_hypertension)
+
+```
+
+## Preeclampsia
+
+```{r}
+# create gestational diabetes comorbidity
+events_preeclampsia <- events |> 
+  buscar_comor(
+    nombre_comor = "m_preeclampsia",
+    var_cod = "event_code",
+    cod_comor = cod_preeclampsia) |> 
+  filter(m_preeclampsia == 1) |> 
+  select(person_id, start_date_record) |> 
+  group_by(person_id) |> 
+  mutate(n_preeclampsia = 1:n()) |>
+  pivot_wider(
+    names_from = n_preeclampsia,
+    names_prefix = "preeclampsia_date_",
+    values_from = start_date_record) |> 
+  ungroup()
+
+pregnancies_cohort_04 <- pregnancies_cohort_03 |> 
+  left_join(events_preeclampsia, by = c("sip" = "person_id")) |> 
+  mutate(
+    across(starts_with("preeclampsia_date_"), 
+           ~ if_else(between(.x, fecha_inicio %m+% days(140), fecha_fin), 1, 0, 
+                     missing = 0))) |> 
+   mutate(m_preeclampsia = pmax(
+     preeclampsia_date_1, 
+     preeclampsia_date_2, 
+     preeclampsia_date_3, 
+     preeclampsia_date_4, 
+     preeclampsia_date_5, 
+     preeclampsia_date_6, 
+     preeclampsia_date_7, 
+     preeclampsia_date_8, 
+     preeclampsia_date_9, 
+     preeclampsia_date_10, 
+     preeclampsia_date_11, 
+     preeclampsia_date_12, 
+     preeclampsia_date_13, 
+     preeclampsia_date_14, 
+     preeclampsia_date_15, 
+     preeclampsia_date_16, 
+     preeclampsia_date_17, 
+     preeclampsia_date_18, 
+     preeclampsia_date_19, 
+     preeclampsia_date_20, 
+     preeclampsia_date_21, 
+     preeclampsia_date_22, 
+     preeclampsia_date_23, 
+     preeclampsia_date_24, 
+     preeclampsia_date_25, 
+     preeclampsia_date_26, 
+     preeclampsia_date_27, 
+     preeclampsia_date_28, 
+     preeclampsia_date_29, 
+     preeclampsia_date_30, 
+     preeclampsia_date_31, 
+     preeclampsia_date_32, 
+     preeclampsia_date_33, 
+     preeclampsia_date_34, 
+     preeclampsia_date_35, 
+     preeclampsia_date_36, 
+     preeclampsia_date_37,
+                                 na.rm = TRUE)) |> 
+  select(-c(preeclampsia_date_1:preeclampsia_date_37))
+  
+pregnancies_cohort_04 |> 
+   tabyl(m_preeclampsia)
+
+```
+
+## Smoking
+
+```{r}
+# retrieve codes-------------------------------------------------------------
+events_smoking <- events |> 
+  buscar_comor(
+    nombre_comor = "m_smoking",
+    var_cod = "event_code",
+    cod_comor = cod_smoking) |> 
+  filter(m_smoking == 1) |> 
+  select(person_id, start_date_record) |> 
+  tidylog::distinct() 
+
+diagnoses_smoking <- diagnoses |> 
+  buscar_comor(
+    nombre_comor = "m_smoking",
+    var_cod = "diag_cod",
+    cod_comor = cod_smoking) |> 
+  filter(m_smoking == 1) |> 
+  select(sip, fecha_act, fecha_desact) |> 
+  tidylog::distinct() 
+
+pregnancies_cohort_events_smoking <- pregnancies_cohort_04 |> 
+# unir cmbd con cohorte y filtrar fechas que no coincidan con el follow-up
+  left_join(events_smoking, by = c("sip" = "person_id")) |>  
+   tidylog::filter(
+     start_date_record >= fecha_inicio %m-% days(180)) |> 
+  tidylog::filter(
+    start_date_record <= fecha_inicio) |> 
+  tidylog::distinct(sip, fecha_inicio) |> 
+  mutate(m_smoking = 1)
+
+pregnancies_cohort_diagnoses_smoking <- pregnancies_cohort_04 |> 
+# unir cmbd con cohorte y filtrar fechas que no coincidan con el follow-up
+  left_join(diagnoses_smoking, by = c("sip" = "sip")) |>  
+   tidylog::filter(
+     is.na(fecha_desact) |
+     fecha_desact >= fecha_inicio %m-% days(180)) |> 
+  tidylog::filter(
+    fecha_act <= fecha_inicio) |> 
+  tidylog::distinct(sip, fecha_inicio) |> 
+  mutate(m_smoking = 1)
+
+pregnancies_cohort_smoking <- pregnancies_cohort_events_smoking |> 
+  union(pregnancies_cohort_diagnoses_smoking)
+
+pregnancies_cohort_05 <- pregnancies_cohort_04 |> 
+  left_join(pregnancies_cohort_smoking) |> 
+  mutate(m_smoking = if_else(is.na(m_smoking), 0, m_smoking))
+
+pregnancies_cohort_05 |> tabyl(m_smoking)
+
+```
+
+## Alcohol
+
+```{r}
+# retrieve codes-------------------------------------------------------------
+events_alcohol <- events |> 
+  buscar_comor(
+    nombre_comor = "m_alcohol",
+    var_cod = "event_code",
+    cod_comor = cod_alcohol) |> 
+  filter(m_alcohol == 1) |> 
+  select(person_id, start_date_record) |> 
+  tidylog::distinct() 
+
+diagnoses_alcohol <- diagnoses |> 
+  buscar_comor(
+    nombre_comor = "m_alcohol",
+    var_cod = "diag_cod",
+    cod_comor = cod_alcohol) |> 
+  filter(m_alcohol == 1) |> 
+  select(sip, fecha_act, fecha_desact) |> 
+  tidylog::distinct() 
+
+pregnancies_cohort_events_alcohol <- pregnancies_cohort_05 |> 
+# unir cmbd con cohorte y filtrar fechas que no coincidan con el follow-up
+  left_join(events_alcohol, by = c("sip" = "person_id")) |>  
+   tidylog::filter(
+     start_date_record >= fecha_inicio %m-% days(180)) |> 
+  tidylog::filter(
+    start_date_record <= fecha_inicio) |> 
+  tidylog::distinct(sip, fecha_inicio) |> 
+  mutate(m_alcohol = 1)
+
+pregnancies_cohort_diagnoses_alcohol <- pregnancies_cohort_05 |> 
+# unir cmbd con cohorte y filtrar fechas que no coincidan con el follow-up
+  left_join(diagnoses_alcohol, by = c("sip" = "sip")) |>  
+   tidylog::filter(
+     is.na(fecha_desact) |
+     fecha_desact >= fecha_inicio %m-% days(180)) |> 
+  tidylog::filter(
+    fecha_act <= fecha_inicio) |> 
+  tidylog::distinct(sip, fecha_inicio) |> 
+  mutate(m_alcohol = 1)
+
+pregnancies_cohort_alcohol <- pregnancies_cohort_events_alcohol |> 
+  union(pregnancies_cohort_diagnoses_alcohol)
+
+pregnancies_cohort_06 <- pregnancies_cohort_05 |> 
+  left_join(pregnancies_cohort_alcohol) |> 
+  mutate(m_alcohol = if_else(is.na(m_alcohol), 0, m_alcohol))
+
+pregnancies_cohort_06 |> tabyl(m_alcohol)
+
+```
+
+## Sedentary behaviour
+
+```{r}
+# retrieve codes-------------------------------------------------------------
+events_sedentary <- events |> 
+  buscar_comor(
+    nombre_comor = "m_sedentary",
+    var_cod = "event_code",
+    cod_comor = cod_sedentary) |> 
+  filter(m_sedentary == 1) |> 
+  select(person_id, start_date_record) |> 
+  tidylog::distinct() 
+
+diagnoses_sedentary <- diagnoses |> 
+  buscar_comor(
+    nombre_comor = "m_sedentary",
+    var_cod = "diag_cod",
+    cod_comor = cod_sedentary) |> 
+  filter(m_sedentary == 1) |> 
+  select(sip, fecha_act, fecha_desact) |> 
+  tidylog::distinct() 
+
+pregnancies_cohort_events_sedentary <- pregnancies_cohort_06 |> 
+# unir cmbd con cohorte y filtrar fechas que no coincidan con el follow-up
+  left_join(events_sedentary, by = c("sip" = "person_id")) |>  
+   tidylog::filter(
+     start_date_record >= fecha_inicio %m-% days(180)) |> 
+  tidylog::filter(
+    start_date_record <= fecha_inicio) |> 
+  tidylog::distinct(sip, fecha_inicio) |> 
+  mutate(m_sedentary = 1)
+
+pregnancies_cohort_diagnoses_sedentary <- pregnancies_cohort_06 |> 
+# unir cmbd con cohorte y filtrar fechas que no coincidan con el follow-up
+  left_join(diagnoses_sedentary, by = c("sip" = "sip")) |>  
+   tidylog::filter(
+     is.na(fecha_desact) |
+     fecha_desact >= fecha_inicio %m-% days(180)) |> 
+  tidylog::filter(
+    fecha_act <= fecha_inicio) |> 
+  tidylog::distinct(sip, fecha_inicio) |> 
+  mutate(m_sedentary = 1)
+
+pregnancies_cohort_sedentary <- pregnancies_cohort_events_sedentary |> 
+  union(pregnancies_cohort_diagnoses_sedentary)
+
+pregnancies_cohort_07 <- pregnancies_cohort_06 |> 
+  left_join(pregnancies_cohort_sedentary) |> 
+  mutate(m_sedentary = if_else(is.na(m_sedentary), 0, m_sedentary))
+
+pregnancies_cohort_07 |> tabyl(m_sedentary)
+
+```
+
+## Drug abuse
+
+```{r}
+# retrieve codes-------------------------------------------------------------
+events_drug_abuse <- events |> 
+  buscar_comor(
+    nombre_comor = "m_drug_abuse",
+    var_cod = "event_code",
+    cod_comor = cod_drug_abuse) |> 
+  filter(m_drug_abuse == 1) |> 
+  select(person_id, start_date_record) |> 
+  tidylog::distinct() 
+
+diagnoses_drug_abuse <- diagnoses |> 
+  buscar_comor(
+    nombre_comor = "m_drug_abuse",
+    var_cod = "diag_cod",
+    cod_comor = cod_drug_abuse) |> 
+  filter(m_drug_abuse == 1) |> 
+  select(sip, fecha_act, fecha_desact) |> 
+  tidylog::distinct() 
+
+pregnancies_cohort_events_drug_abuse <- pregnancies_cohort_07 |> 
+# unir cmbd con cohorte y filtrar fechas que no coincidan con el follow-up
+  left_join(events_drug_abuse, by = c("sip" = "person_id")) |>  
+   tidylog::filter(
+     start_date_record >= fecha_inicio %m-% days(180)) |> 
+  tidylog::filter(
+    start_date_record <= fecha_inicio) |> 
+  tidylog::distinct(sip, fecha_inicio) |> 
+  mutate(m_drug_abuse = 1)
+
+pregnancies_cohort_diagnoses_drug_abuse <- pregnancies_cohort_07 |> 
+# unir cmbd con cohorte y filtrar fechas que no coincidan con el follow-up
+  left_join(diagnoses_drug_abuse, by = c("sip" = "sip")) |>  
+   tidylog::filter(
+     is.na(fecha_desact) |
+     fecha_desact >= fecha_inicio %m-% days(180)) |> 
+  tidylog::filter(
+    fecha_act <= fecha_inicio) |> 
+  tidylog::distinct(sip, fecha_inicio) |> 
+  mutate(m_drug_abuse = 1)
+
+pregnancies_cohort_drug_abuse <- pregnancies_cohort_events_drug_abuse |> 
+  union(pregnancies_cohort_diagnoses_drug_abuse)
+
+pregnancies_cohort_08 <- pregnancies_cohort_07 |> 
+  left_join(pregnancies_cohort_drug_abuse) |> 
+  mutate(m_drug_abuse = if_else(is.na(m_drug_abuse), 0, m_drug_abuse))
+
+pregnancies_cohort_08 |> tabyl(m_drug_abuse)
+
+```
+
+## Hypertension
+
+```{r}
+# retrieve codes-------------------------------------------------------------
+events_ht <- events |> 
+  buscar_comor(
+    nombre_comor = "m_hypertension",
+    var_cod = "event_code",
+    cod_comor = cod_hypert) |> 
+  filter(m_hypertension == 1) |> 
+  select(person_id, start_date_record) |> 
+  tidylog::distinct() 
+
+diagnoses_ht <- diagnoses |> 
+  buscar_comor(
+    nombre_comor = "m_hypertension",
+    var_cod = "diag_cod",
+    cod_comor = cod_hypert) |> 
+  filter(m_hypertension == 1) |> 
+  select(sip, fecha_act, fecha_desact) |> 
+  tidylog::distinct() 
+
+pregnancies_cohort_events_ht <- pregnancies_cohort_08 |> 
+# unir cmbd con cohorte y filtrar fechas que no coincidan con el follow-up
+  left_join(events_ht, by = c("sip" = "person_id")) |>  
+   tidylog::filter(
+     start_date_record >= fecha_inicio %m-% days(180)) |> 
+  tidylog::filter(
+    start_date_record <= fecha_inicio %m+% days(140)) |> 
+  tidylog::distinct(sip, fecha_inicio) |> 
+  mutate(m_hypertension = 1)
+
+pregnancies_cohort_diagnoses_ht <- pregnancies_cohort_08 |> 
+# unir cmbd con cohorte y filtrar fechas que no coincidan con el follow-up
+  left_join(diagnoses_ht, by = c("sip" = "sip")) |>  
+   tidylog::filter(
+     is.na(fecha_desact) |
+     fecha_desact >= fecha_inicio %m-% days(180)) |> 
+  tidylog::filter(
+    fecha_act <= fecha_inicio %m+% days(140)) |> 
+  tidylog::distinct(sip, fecha_inicio) |> 
+  mutate(m_hypertension = 1)
+
+pregnancies_cohort_ht <- pregnancies_cohort_events_ht |> 
+  union(pregnancies_cohort_diagnoses_ht)
+
+pregnancies_cohort_09 <- pregnancies_cohort_08 |> 
+  left_join(pregnancies_cohort_ht) |> 
+  mutate(m_hypertension = if_else(is.na(m_hypertension), 0, m_hypertension))
+
+pregnancies_cohort_09 |> tabyl(m_hypertension)
+
+```
+
+## Congestive heart failure
+
+```{r}
+# retrieve codes-------------------------------------------------------------
+events_chf <- events |> 
+  buscar_comor(
+    nombre_comor = "m_chf",
+    var_cod = "event_code",
+    cod_comor = cod_chf) |> 
+  filter(m_chf == 1) |> 
+  select(person_id, start_date_record) |> 
+  tidylog::distinct() 
+
+diagnoses_chf <- diagnoses |> 
+  buscar_comor(
+    nombre_comor = "m_chf",
+    var_cod = "diag_cod",
+    cod_comor = cod_chf) |> 
+  filter(m_chf == 1) |> 
+  select(sip, fecha_act, fecha_desact) |> 
+  tidylog::distinct() 
+
+pregnancies_cohort_events_chf <- pregnancies_cohort_09 |> 
+# unir cmbd con cohorte y filtrar fechas que no coincidan con el follow-up
+  left_join(events_chf, by = c(sip = "person_id")) |>  
+   tidylog::filter(
+     start_date_record >= fecha_inicio %m-% days(180)) |> 
+  tidylog::filter(
+    start_date_record <= fecha_inicio) |> 
+  tidylog::distinct(sip, fecha_inicio) |> 
+  mutate(m_chf = 1)
+
+pregnancies_cohort_diagnoses_chf <- pregnancies_cohort_09 |> 
+# unir cmbd con cohorte y filtrar fechas que no coincidan con el follow-up
+  left_join(diagnoses_chf, by = c("sip" = "sip")) |>  
+   tidylog::filter(
+     is.na(fecha_desact) |
+     fecha_desact >= fecha_inicio %m-% days(180)) |> 
+  tidylog::filter(
+    fecha_act <= fecha_inicio) |> 
+  tidylog::distinct(sip, fecha_inicio) |> 
+  mutate(m_chf = 1)
+
+pregnancies_cohort_chf <- pregnancies_cohort_events_chf |> 
+  union(pregnancies_cohort_diagnoses_chf)
+
+pregnancies_cohort_10 <- pregnancies_cohort_09 |> 
+  left_join(pregnancies_cohort_chf) |> 
+  mutate(m_chf = if_else(is.na(m_chf), 0, m_chf))
+
+pregnancies_cohort_10 |> tabyl(m_chf)
+
+```
+
+## Lipid disorders
+
+```{r}
+# retrieve codes-------------------------------------------------------------
+events_lipid <- events |> 
+  buscar_comor(
+    nombre_comor = "m_lipid",
+    var_cod = "event_code",
+    cod_comor = cod_lipid) |> 
+  filter(m_lipid == 1) |> 
+  select(person_id, start_date_record) |> 
+  tidylog::distinct() 
+
+diagnoses_lipid <- diagnoses |> 
+  buscar_comor(
+    nombre_comor = "m_lipid",
+    var_cod = "diag_cod",
+    cod_comor = cod_lipid) |> 
+  filter(m_lipid == 1) |> 
+  select(sip, fecha_act, fecha_desact) |> 
+  tidylog::distinct() 
+
+pregnancies_cohort_events_lipid <- pregnancies_cohort_10 |> 
+# unir cmbd con cohorte y filtrar fechas que no coincidan con el follow-up
+  left_join(events_lipid, by = c(sip = "person_id")) |>  
+   tidylog::filter(
+     start_date_record >= fecha_inicio %m-% days(180)) |> 
+  tidylog::filter(
+    start_date_record <= fecha_inicio) |> 
+  tidylog::distinct(sip, fecha_inicio) |> 
+  mutate(m_lipid = 1)
+
+pregnancies_cohort_diagnoses_lipid <- pregnancies_cohort_10 |> 
+# unir cmbd con cohorte y filtrar fechas que no coincidan con el follow-up
+  left_join(diagnoses_lipid, by = c("sip" = "sip")) |>  
+   tidylog::filter(
+     is.na(fecha_desact) |
+     fecha_desact >= fecha_inicio %m-% days(180)) |> 
+  tidylog::filter(
+    fecha_act <= fecha_inicio) |> 
+  tidylog::distinct(sip, fecha_inicio) |> 
+  mutate(m_lipid = 1)
+
+pregnancies_cohort_lipid <- pregnancies_cohort_events_lipid |> 
+  union(pregnancies_cohort_diagnoses_lipid)
+
+pregnancies_cohort_11 <- pregnancies_cohort_10 |> 
+  left_join(pregnancies_cohort_lipid) |> 
+  mutate(m_lipid = if_else(is.na(m_lipid), 0, m_lipid))
+
+pregnancies_cohort_11 |> tabyl(m_lipid)
+
+```
+
+## Diabetes
+
+```{r}
+# retrieve codes-------------------------------------------------------------
+events_diabetes <- events |> 
+  buscar_comor(
+    nombre_comor = "m_diabetes",
+    var_cod = "event_code",
+    cod_comor = cod_diabetes) |> 
+  filter(m_diabetes == 1) |> 
+  select(person_id, start_date_record) |> 
+  tidylog::distinct() 
+
+diagnoses_diabetes <- diagnoses |> 
+  buscar_comor(
+    nombre_comor = "m_diabetes",
+    var_cod = "diag_cod",
+    cod_comor = cod_diabetes) |> 
+  filter(m_diabetes == 1) |> 
+  select(sip, fecha_act, fecha_desact) |> 
+  tidylog::distinct() 
+
+pregnancies_cohort_events_diabetes <- pregnancies_cohort_11 |> 
+# unir cmbd con cohorte y filtrar fechas que no coincidan con el follow-up
+  left_join(events_diabetes, by = c(sip = "person_id")) |>  
+   tidylog::filter(
+     start_date_record >= fecha_inicio %m-% days(180)) |> 
+  tidylog::filter(
+    start_date_record <= fecha_inicio %m+% days(140)) |> 
+  tidylog::distinct(sip, fecha_inicio) |> 
+  mutate(m_diabetes = 1)
+
+pregnancies_cohort_diagnoses_diabetes <- pregnancies_cohort_11 |> 
+# unir cmbd con cohorte y filtrar fechas que no coincidan con el follow-up
+  left_join(diagnoses_diabetes, by = c("sip" = "sip")) |>  
+   tidylog::filter(
+     is.na(fecha_desact) |
+     fecha_desact >= fecha_inicio %m-% days(180)) |> 
+  tidylog::filter(
+    fecha_act <= fecha_inicio %m+% days(140)) |> 
+  tidylog::distinct(sip, fecha_inicio) |> 
+  mutate(m_diabetes = 1)
+
+pregnancies_cohort_diabetes <- pregnancies_cohort_events_diabetes |> 
+  union(pregnancies_cohort_diagnoses_diabetes)
+
+pregnancies_cohort_12 <- pregnancies_cohort_11 |> 
+  left_join(pregnancies_cohort_diabetes) |> 
+  mutate(m_diabetes = if_else(is.na(m_diabetes), 0, m_diabetes))
+
+pregnancies_cohort_12 |> tabyl(m_diabetes)
+
+```
+
+## Depression
+
+```{r}
+# retrieve codes-------------------------------------------------------------
+events_depression <- events |> 
+  buscar_comor(
+    nombre_comor = "m_depression",
+    var_cod = "event_code",
+    cod_comor = cod_depression) |> 
+  filter(m_depression == 1) |> 
+  select(person_id, start_date_record) |> 
+  tidylog::distinct() 
+
+diagnoses_depression <- diagnoses |> 
+  buscar_comor(
+    nombre_comor = "m_depression",
+    var_cod = "diag_cod",
+    cod_comor = cod_depression) |> 
+  filter(m_depression == 1) |> 
+  select(sip, fecha_act, fecha_desact) |> 
+  tidylog::distinct() 
+
+pregnancies_cohort_events_depression <- pregnancies_cohort_12 |> 
+# unir cmbd con cohorte y filtrar fechas que no coincidan con el follow-up
+  left_join(events_depression, by = c(sip = "person_id")) |>  
+   tidylog::filter(
+     start_date_record >= fecha_inicio %m-% days(180)) |> 
+  tidylog::filter(
+    start_date_record <= fecha_inicio) |> 
+  tidylog::distinct(sip, fecha_inicio) |> 
+  mutate(m_depression = 1)
+
+pregnancies_cohort_diagnoses_depression <- pregnancies_cohort_12 |> 
+# unir cmbd con cohorte y filtrar fechas que no coincidan con el follow-up
+  left_join(diagnoses_depression, by = c("sip" = "sip")) |>  
+   tidylog::filter(
+     is.na(fecha_desact) |
+     fecha_desact >= fecha_inicio %m-% days(180)) |> 
+  tidylog::filter(
+    fecha_act <= fecha_inicio) |> 
+  tidylog::distinct(sip, fecha_inicio) |> 
+  mutate(m_depression = 1)
+
+pregnancies_cohort_depression <- pregnancies_cohort_events_depression |> 
+  union(pregnancies_cohort_diagnoses_depression)
+
+pregnancies_cohort_13 <- pregnancies_cohort_12 |> 
+  left_join(pregnancies_cohort_depression) |> 
+  mutate(m_depression = if_else(is.na(m_depression), 0, m_depression))
+
+pregnancies_cohort_13 |> tabyl(m_depression)
+
+```
+
+## Anxiety
+
+```{r}
+# retrieve codes-------------------------------------------------------------
+events_anxiety <- events |> 
+  buscar_comor(
+    nombre_comor = "m_anxiety",
+    var_cod = "event_code",
+    cod_comor = cod_anxiety) |> 
+  filter(m_anxiety == 1) |> 
+  select(person_id, start_date_record) |> 
+  tidylog::distinct() 
+
+diagnoses_anxiety <- diagnoses |> 
+  buscar_comor(
+    nombre_comor = "m_anxiety",
+    var_cod = "diag_cod",
+    cod_comor = cod_anxiety) |> 
+  filter(m_anxiety == 1) |> 
+  select(sip, fecha_act, fecha_desact) |> 
+  tidylog::distinct() 
+
+pregnancies_cohort_events_anxiety <- pregnancies_cohort_13 |> 
+# unir cmbd con cohorte y filtrar fechas que no coincidan con el follow-up
+  left_join(events_anxiety, by = c(sip = "person_id")) |>  
+   tidylog::filter(
+     start_date_record >= fecha_inicio %m-% days(180)) |> 
+  tidylog::filter(
+    start_date_record <= fecha_inicio) |> 
+  tidylog::distinct(sip, fecha_inicio) |> 
+  mutate(m_anxiety = 1)
+
+pregnancies_cohort_diagnoses_anxiety <- pregnancies_cohort_13 |> 
+# unir cmbd con cohorte y filtrar fechas que no coincidan con el follow-up
+  left_join(diagnoses_anxiety, by = c("sip" = "sip")) |>  
+   tidylog::filter(
+     is.na(fecha_desact) |
+     fecha_desact >= fecha_inicio %m-% days(180)) |> 
+  tidylog::filter(
+    fecha_act <= fecha_inicio) |> 
+  tidylog::distinct(sip, fecha_inicio) |> 
+  mutate(m_anxiety = 1)
+
+pregnancies_cohort_anxiety <- pregnancies_cohort_events_anxiety |> 
+  union(pregnancies_cohort_diagnoses_anxiety)
+
+pregnancies_cohort_14 <- pregnancies_cohort_13 |> 
+  left_join(pregnancies_cohort_anxiety) |> 
+  mutate(m_anxiety = if_else(is.na(m_anxiety), 0, m_anxiety))
+
+pregnancies_cohort_14 |> tabyl(m_anxiety)
+
+```
+
+## Psychotic disorder
+
+```{r}
+# retrieve codes-------------------------------------------------------------
+events_psychotic <- events |> 
+  buscar_comor(
+    nombre_comor = "m_psychotic",
+    var_cod = "event_code",
+    cod_comor = cod_psychotic) |> 
+  filter(m_psychotic == 1) |> 
+  select(person_id, start_date_record) |> 
+  tidylog::distinct() 
+
+diagnoses_psychotic <- diagnoses |> 
+  buscar_comor(
+    nombre_comor = "m_psychotic",
+    var_cod = "diag_cod",
+    cod_comor = cod_psychotic) |> 
+  filter(m_psychotic == 1) |> 
+  select(sip, fecha_act, fecha_desact) |> 
+  tidylog::distinct() 
+
+pregnancies_cohort_events_psychotic <- pregnancies_cohort_14 |> 
+# unir cmbd con cohorte y filtrar fechas que no coincidan con el follow-up
+  left_join(events_psychotic, by = c(sip = "person_id")) |>  
+   tidylog::filter(
+     start_date_record >= fecha_inicio %m-% days(180)) |> 
+  tidylog::filter(
+    start_date_record <= fecha_inicio) |> 
+  tidylog::distinct(sip, fecha_inicio) |> 
+  mutate(m_psychotic = 1)
+
+pregnancies_cohort_diagnoses_psychotic <- pregnancies_cohort_14 |> 
+# unir cmbd con cohorte y filtrar fechas que no coincidan con el follow-up
+  left_join(diagnoses_psychotic, by = c("sip" = "sip")) |>  
+   tidylog::filter(
+     is.na(fecha_desact) |
+     fecha_desact >= fecha_inicio %m-% days(180)) |> 
+  tidylog::filter(
+    fecha_act <= fecha_inicio) |> 
+  tidylog::distinct(sip, fecha_inicio) |> 
+  mutate(m_psychotic = 1)
+
+pregnancies_cohort_psychotic <- pregnancies_cohort_events_psychotic |> 
+  union(pregnancies_cohort_diagnoses_psychotic)
+
+pregnancies_cohort_15 <- pregnancies_cohort_14 |> 
+  left_join(pregnancies_cohort_psychotic) |> 
+  mutate(m_psychotic = if_else(is.na(m_psychotic), 0, m_psychotic))
+
+pregnancies_cohort_15 |> tabyl(m_psychotic)
+
+```
+
+## Bipolar
+
+```{r}
+# retrieve codes-------------------------------------------------------------
+events_bipolar <- events |> 
+  buscar_comor(
+    nombre_comor = "m_bipolar",
+    var_cod = "event_code",
+    cod_comor = cod_bipolar) |> 
+  filter(m_bipolar == 1) |> 
+  select(person_id, start_date_record) |> 
+  tidylog::distinct() 
+
+diagnoses_bipolar <- diagnoses |> 
+  buscar_comor(
+    nombre_comor = "m_bipolar",
+    var_cod = "diag_cod",
+    cod_comor = cod_bipolar) |> 
+  filter(m_bipolar == 1) |> 
+  select(sip, fecha_act, fecha_desact) |> 
+  tidylog::distinct() 
+
+pregnancies_cohort_events_bipolar <- pregnancies_cohort_15 |> 
+# unir cmbd con cohorte y filtrar fechas que no coincidan con el follow-up
+  left_join(events_bipolar, by = c(sip = "person_id")) |>  
+   tidylog::filter(
+     start_date_record >= fecha_inicio %m-% days(180)) |> 
+  tidylog::filter(
+    start_date_record <= fecha_inicio) |> 
+  tidylog::distinct(sip, fecha_inicio) |> 
+  mutate(m_bipolar = 1)
+
+pregnancies_cohort_diagnoses_bipolar <- pregnancies_cohort_15 |> 
+# unir cmbd con cohorte y filtrar fechas que no coincidan con el follow-up
+  left_join(diagnoses_bipolar, by = c("sip" = "sip")) |>  
+   tidylog::filter(
+     is.na(fecha_desact) |
+     fecha_desact >= fecha_inicio %m-% days(180)) |> 
+  tidylog::filter(
+    fecha_act <= fecha_inicio) |> 
+  tidylog::distinct(sip, fecha_inicio) |> 
+  mutate(m_bipolar = 1)
+
+pregnancies_cohort_bipolar <- pregnancies_cohort_events_bipolar |> 
+  union(pregnancies_cohort_diagnoses_bipolar)
+
+pregnancies_cohort_16 <- pregnancies_cohort_15 |> 
+  left_join(pregnancies_cohort_bipolar) |> 
+  mutate(m_bipolar = if_else(is.na(m_bipolar), 0, m_bipolar))
+
+pregnancies_cohort_16 |> tabyl(m_bipolar)
+
+```
+
+## Obesity
+
+```{r}
+# retrieve codes-------------------------------------------------------------
+events_obesity <- events |> 
+  buscar_comor(
+    nombre_comor = "m_obesity",
+    var_cod = "event_code",
+    cod_comor = cod_obesity) |> 
+  filter(m_obesity == 1) |> 
+  select(person_id, start_date_record) |> 
+  tidylog::distinct() 
+
+diagnoses_obesity <- diagnoses |> 
+  buscar_comor(
+    nombre_comor = "m_obesity",
+    var_cod = "diag_cod",
+    cod_comor = cod_obesity) |> 
+  filter(m_obesity == 1) |> 
+  select(sip, fecha_act, fecha_desact) |> 
+  tidylog::distinct() 
+
+pregnancies_cohort_events_obesity <- pregnancies_cohort_16 |> 
+# unir cmbd con cohorte y filtrar fechas que no coincidan con el follow-up
+  left_join(events_obesity, by = c(sip = "person_id")) |>  
+   tidylog::filter(
+     start_date_record >= fecha_inicio %m-% days(180)) |> 
+  tidylog::filter(
+    start_date_record <= fecha_inicio) |> 
+  tidylog::distinct(sip, fecha_inicio) |> 
+  mutate(m_obesity = 1)
+
+pregnancies_cohort_diagnoses_obesity <- pregnancies_cohort_16 |> 
+# unir cmbd con cohorte y filtrar fechas que no coincidan con el follow-up
+  left_join(diagnoses_obesity, by = c("sip" = "sip")) |>  
+   tidylog::filter(
+     is.na(fecha_desact) |
+     fecha_desact >= fecha_inicio %m-% days(180)) |> 
+  tidylog::filter(
+    fecha_act <= fecha_inicio) |> 
+  tidylog::distinct(sip, fecha_inicio) |> 
+  mutate(m_obesity = 1)
+
+pregnancies_cohort_obesity <- pregnancies_cohort_events_obesity |> 
+  union(pregnancies_cohort_diagnoses_obesity)
+
+pregnancies_cohort_17 <- pregnancies_cohort_16 |> 
+  left_join(pregnancies_cohort_obesity) |> 
+  mutate(m_obesity = if_else(is.na(m_obesity), 0, m_obesity))
+
+pregnancies_cohort_17 |> tabyl(m_obesity)
+
+```
+
+## Asthma
+
+```{r}
+# retrieve codes-------------------------------------------------------------
+events_asthma <- events |> 
+  buscar_comor(
+    nombre_comor = "m_asthma",
+    var_cod = "event_code",
+    cod_comor = cod_asthma) |> 
+  filter(m_asthma == 1) |> 
+  select(person_id, start_date_record) |> 
+  tidylog::distinct() 
+
+diagnoses_asthma <- diagnoses |> 
+  buscar_comor(
+    nombre_comor = "m_asthma",
+    var_cod = "diag_cod",
+    cod_comor = cod_asthma) |> 
+  filter(m_asthma == 1) |> 
+  select(sip, fecha_act, fecha_desact) |> 
+  tidylog::distinct() 
+
+pregnancies_cohort_events_asthma <- pregnancies_cohort_17 |> 
+# unir cmbd con cohorte y filtrar fechas que no coincidan con el follow-up
+  left_join(events_asthma, by = c(sip = "person_id")) |>  
+   tidylog::filter(
+     start_date_record >= fecha_inicio %m-% days(180)) |> 
+  tidylog::filter(
+    start_date_record <= fecha_inicio) |> 
+  tidylog::distinct(sip, fecha_inicio) |> 
+  mutate(m_asthma = 1)
+
+pregnancies_cohort_diagnoses_asthma <- pregnancies_cohort_17 |> 
+# unir cmbd con cohorte y filtrar fechas que no coincidan con el follow-up
+  left_join(diagnoses_asthma, by = c("sip" = "sip")) |>  
+   tidylog::filter(
+     is.na(fecha_desact) |
+     fecha_desact >= fecha_inicio %m-% days(180)) |> 
+  tidylog::filter(
+    fecha_act <= fecha_inicio) |> 
+  tidylog::distinct(sip, fecha_inicio) |> 
+  mutate(m_asthma = 1)
+
+pregnancies_cohort_asthma <- pregnancies_cohort_events_asthma |> 
+  union(pregnancies_cohort_diagnoses_asthma)
+
+pregnancies_cohort_18 <- pregnancies_cohort_17 |> 
+  left_join(pregnancies_cohort_asthma) |> 
+  mutate(m_asthma = if_else(is.na(m_asthma), 0, m_asthma))
+
+pregnancies_cohort_18 |> tabyl(m_asthma)
+
+```
+
+## Epilepsy
+
+```{r}
+# retrieve codes-------------------------------------------------------------
+events_epilepsy <- events |> 
+  buscar_comor(
+    nombre_comor = "m_epilepsy",
+    var_cod = "event_code",
+    cod_comor = cod_epilepsy) |> 
+  filter(m_epilepsy == 1) |> 
+  select(person_id, start_date_record) |> 
+  tidylog::distinct() 
+
+diagnoses_epilepsy <- diagnoses |> 
+  buscar_comor(
+    nombre_comor = "m_epilepsy",
+    var_cod = "diag_cod",
+    cod_comor = cod_epilepsy) |> 
+  filter(m_epilepsy == 1) |> 
+  select(sip, fecha_act, fecha_desact) |> 
+  tidylog::distinct() 
+
+pregnancies_cohort_events_epilepsy <- pregnancies_cohort_18 |> 
+# unir cmbd con cohorte y filtrar fechas que no coincidan con el follow-up
+  left_join(events_epilepsy, by = c(sip = "person_id")) |>  
+   tidylog::filter(
+     start_date_record >= fecha_inicio %m-% days(180)) |> 
+  tidylog::filter(
+    start_date_record <= fecha_inicio) |> 
+  tidylog::distinct(sip, fecha_inicio) |> 
+  mutate(m_epilepsy = 1)
+
+pregnancies_cohort_diagnoses_epilepsy <- pregnancies_cohort_18 |> 
+# unir cmbd con cohorte y filtrar fechas que no coincidan con el follow-up
+  left_join(diagnoses_epilepsy, by = c("sip" = "sip")) |>  
+   tidylog::filter(
+     is.na(fecha_desact) |
+     fecha_desact >= fecha_inicio %m-% days(180)) |> 
+  tidylog::filter(
+    fecha_act <= fecha_inicio) |> 
+  tidylog::distinct(sip, fecha_inicio) |> 
+  mutate(m_epilepsy = 1)
+
+pregnancies_cohort_epilepsy <- pregnancies_cohort_events_epilepsy |> 
+  union(pregnancies_cohort_diagnoses_epilepsy)
+
+pregnancies_cohort_19 <- pregnancies_cohort_18 |> 
+  left_join(pregnancies_cohort_epilepsy) |> 
+  mutate(m_epilepsy = if_else(is.na(m_epilepsy), 0, m_epilepsy))
+
+pregnancies_cohort_19 |> tabyl(m_epilepsy)
+
+```
+
+# Visits
+
+```{r}
+# # Load visits----------------------------------------------------------------
+#  visit_occurrence <- fread2(file.path(procesados, 
+#                  "Target_tables_algorithm", "Big_files",
+#                  "VISIT_OCCURRENCE.csv")) |>
+#    filter(person_id %in% sips_pregnancies_cohort)
+# 
+# # read pcv file--------------------------------------------------------------
+# fread_pcv <- function(...){
+#   data.table::fread(
+#     encoding = "UTF-8",
+#     colClasses = c(
+#     sip                  = "character",
+#     fecha_consulta       = "Date",
+#     serv_at_cod          = "character",
+#     serv_at_desc         = "character",
+#     diag_cod             = "character",
+#     diag_desc            = "character",
+#     tipo_codigo          = "character"),
+#     ...)
+# } 
+# 
+# pcv <- fread_pcv(file.path(procesados, "pcv.csv")) |>
+#    filter(sip %in% sips_pregnancies_cohort)
+# 
+# # read cex file--------------------------------------------------------------
+# fread_cex <- function(...){
+#   data.table::fread(
+#     encoding = "UTF-8",
+#     colClasses = c(
+#     sip                = "character",
+#     fecha_consulta     = "Date",
+#     especialidad_cod   = "character",
+#     especialidad_desc  = "character",
+#     d1_cod             = "character",
+#     d1_desc            = "character",
+#     d2_cod             = "character",
+#     d2_desc            = "character",
+#     d3_cod             = "character",
+#     d3_desc            = "character",
+#     d4_cod             = "character",
+#     d4_desc            = "character",
+#     tipo_codigo1       = "character",
+#     tipo_codigo2       = "character",
+#     tipo_codigo3       = "character",
+#     tipo_codigo4       = "character"),
+#     ...)
+# }
+# 
+# cex <- fread_pcv(file.path(procesados, "cex.csv")) |>
+#    filter(sip %in% sips_pregnancies_cohort)
+
+```
+
+## use of services
+
+```{r}
+# # use of services------------------------------------------------------------
+# visit_occurrence_cohort <- visit_occurrence |> 
+#   tidylog::filter(origin_of_visit != "DIAGNOSES")
+# 
+# visit_occurrence_cohort |> count(meaning_of_visit)
+# 
+# pregnancies_cohort_visits <- pregnancies_cohort_08 |> 
+# # unir cmbd con cohorte y filtrar fechas que no coincidan con el follow-up
+#   left_join(visit_occurrence_cohort, by = "person_id") |>  
+#    tidylog::filter(visit_start_date >= pregnancy_start_date) |> 
+#    tidylog::filter(visit_start_date <= pregnancy_end_date) 
+# 
+# pregnancies_cohort_visits2 <- pregnancies_cohort_visits |> 
+#   group_by(pregnancy_id) |> 
+#   summarise(
+#     n_emergency_contact = sum(meaning_of_visit == "emergency_contact"),
+#     n_hospitalisation = sum(meaning_of_visit == "hospitalisation"),
+#     n_hospitalisation_not_overnight = sum(meaning_of_visit == "hospitalisation_not_overnight"),
+#     n_oupatient_specialist_visit = sum(meaning_of_visit == "oupatient_specialist_visit"),
+#     n_primary_care = sum(meaning_of_visit == "primary_care"))
+# 
+# pregnancies_cohort_09 <- pregnancies_cohort_08 |> 
+#   left_join(pregnancies_cohort_visits2) |> 
+#   mutate(across(n_emergency_contact:n_primary_care, 
+#                 ~if_else(is.na(.x), 0, .x)))
+
+
+```
+
+# Outcomes
+
+## Cong
+
+```{r}
+# load cong------------------------------------------------------------------
+cong <- fread2(file.path(procesados, "cong.csv"))
+
+```
+
+```{r}
+pregnancies_cohort_cong_0 <- cong |> 
+  select(sip, fecha_fin_emb) 
+
+pregnancies_cohort_cong <- pregnancies_cohort_19 |> 
+  left_join(pregnancies_cohort_cong_0, by = c("sip" = "sip")) |> 
+  tidylog::filter(fecha_fin_emb == fecha_fin) |> 
+  tidylog::distinct(sip, fecha_fin) |> 
+  mutate(o_cong = 1)  
+
+pregnancies_cohort_20 <- pregnancies_cohort_19 |> 
+  left_join(pregnancies_cohort_cong) |> 
+  mutate(o_cong = if_else(is.na(o_cong), 0, o_cong))
+
+pregnancies_cohort_20 |> tabyl(o_cong)
+
+```
+
+## Preterm
+
+```{r}
+# make preterm
+pregnancies_cohort_21 <- pregnancies_cohort_20 |> 
+  mutate(o_preterm = if_else(duration < 259, 1, 0))
+  
+pregnancies_cohort_21 |> filter(tipo_fin == "livebirth") |> 
+  tabyl(o_preterm)
+
+```
+
+## Low weight at birth
+
+```{r}
+# read pregnancy_indicators--------------------------------------------------
+mdr <- fread2(file.path(procesados, "mdr.csv"))
+
+pregnancies_cohort_peso <- mdr |> 
+  filter(
+  year(fecha_fin_emb) >= 2009,
+  year(fecha_fin_emb) <= 2021) |> 
+  mutate(bajo_peso = if_else(peso < 2500, 1, 0))
+
+pregnancies_cohort_peso |> tabyl(bajo_peso)
+
+saveRDS(pregnancies_cohort_peso, file.path(procesados, "pregnancy_algorithm",
+                                          "pregnancies_cohort_peso.RDS"))
+
+mdr |> summarise(
+  mean_peso = mean(peso, na.rm = TRUE),
+  sd_peso = sd(peso, na.rm = TRUE)
+)
+
+```
+
+```{r}
+# agrupar partos en embarazos------------------------------------------------
+pregnancies_cohort_peso2 <- pregnancies_cohort_peso |> 
+  select(sip = sip_madre, 
+         fecha_fin = fecha_fin_emb,
+         bajo_peso) |> 
+  group_by(sip, fecha_fin) |>
+  summarise(bajo_peso = max(bajo_peso))
+
+pregnancies_cohort_22 <- pregnancies_cohort_21 |> 
+  left_join(pregnancies_cohort_peso2, by = c("sip", 
+                                             "fecha_fin"))
+
+```
+
+
+```{r}
+# free some memory-----------------------------------------------------------
+rm(
+  pregnacies_cohort,
+  pregnancies_cohort_0,
+  pregnancies_cohort_02,
+  pregnancies_cohort_03,
+  pregnancies_cohort_04,
+  pregnancies_cohort_05,
+  pregnancies_cohort_06,
+  pregnancies_cohort_07,
+  pregnancies_cohort_08,
+  pregnancies_cohort_09,
+  pregnancies_cohort_0b,
+  pregnancies_cohort_1,
+  pregnancies_cohort_10,
+  pregnancies_cohort_11,
+  pregnancies_cohort_12,
+  pregnancies_cohort_13,
+  pregnancies_cohort_14,
+  pregnancies_cohort_15,
+  pregnancies_cohort_16,
+  pregnancies_cohort_17,
+  pregnancies_cohort_18,
+  pregnancies_cohort_19,
+  pregnancies_cohort_20
+)
+
+gc()
+
+```
+
+# C-Section
+
+```{r}
+# c-section codes--------------------------------------------------------------
+c_section_codes <- c(
+  "^O82",
+  "^O82.0",
+  "^O82.1",
+  "^O82.2",
+  "^O82.8",
+  "^O82.9",
+  "^O84.2",
+  "^O75.82",
+  "^Z38.01",
+  "^Z38.31",
+  "^Z38.62",
+  "^Z38.64",
+  "^Z38.66",
+  "^Z38.69",
+  "^669.7")
+
+proc_c_section <- c("^74$",
+  "^74.9",
+  "^74.91",
+  "^74.99",
+  "^74.0",
+  "^74.1",
+  "^74.2",
+  "^74.3",
+  "^74.4", 
+  "10D00Z0", "10D00Z1", "10D00Z2")
+
+```
+
+```{r}
+# load tables-----------------------------------------------------------------
+procedures <- fread2(file.path(procesados, "Target_tables_algorithm",
+                "procedures.csv")) |>
+  filter(person_id %in% sips_pregnancies_cohort)
+
+```
+
+```{r}
+# count person with cesarean codes-------------------------------------------
+events_c_section <- events |> 
+  mutate(c_section = if_else(str_detect(event_code, 
+         paste(c_section_codes, collapse = "|")) == TRUE, 1, 0)) |> 
+  # seleccionar únicamente los partos con cesárea
+  filter(c_section == 1) |> 
+  mutate(record_date = ymd(start_date_record)) |> 
+  filter(record_date >= ymd(20090401)) |> 
+  filter(record_date < ymd(20200101)) |> 
+  distinct(person_id, record_date) 
+
+procedures_c_section <- procedures |>
+  mutate(c_section = if_else(str_detect(procedure_code, 
+         paste0(proc_c_section, collapse="|")) == TRUE, 1, 0)) |> 
+  # seleccionar únicamente los partos con cesárea
+  filter(c_section == 1) |> 
+ mutate(record_date = ymd(procedure_date)) |> 
+  filter(record_date >= ymd(20090401)) |> 
+  filter(record_date < ymd(20211231)) |> 
+  distinct(person_id, record_date) 
+
+events_c_section |> union(procedures_c_section) |> 
+  distinct(person_id, year(record_date))
+
+# check number of c-section  
+numerator_cesarean <- events_c_section |> union(procedures_c_section) |> 
+  tidylog::distinct(person_id, year(record_date)) |> nrow()
+denominator_cesarean <- pregnancies_cohort_22 |> 
+  filter(tipo_fin == "livebirth") |> nrow()
+
+percent_cesarean <- numerator_cesarean/denominator_cesarean
+
+```
+
+
+```{r}
+# append c-section to the table----------------------------------------------
+c_sections_with_date <- events_c_section |> 
+  union(procedures_c_section) |> 
+  distinct(person_id, record_date)
+
+
+pregnancies_cohort_c_section <- pregnancies_cohort_22 |> 
+# unir cmbd con cohorte y filtrar fechas que no coincidan con el follow-up
+  left_join(c_sections_with_date, by = c(sip = "person_id")) |>  
+   tidylog::filter(
+     record_date >= fecha_fin %m-% days(14)) |> 
+  tidylog::filter(
+    record_date <= fecha_fin %m+% days(14)) |> 
+  tidylog::distinct(sip, fecha_fin) |> 
+  mutate(c_section = 1)
+
+pregnancies_cohort_23 <- pregnancies_cohort_22 |> 
+  left_join(pregnancies_cohort_c_section) |> 
+  mutate(c_section = if_else(is.na(c_section) | tipo_fin != "livebirth",
+                             0, c_section))
+
+pregnancies_cohort_23 |> 
+  tidylog::filter(tipo_fin == "livebirth") |>
+  tabyl(tipo_fin, c_section)
+
+```
+
+# Drug use
+
+```{r}
+# load disp_clean------------------------------------------------------------
+gaia_pq <- open_dataset(file.path(procesados, "07_GAIA", 
+                                  "07j_gaia_non_standard"))
+
+gaia <- gaia_pq |> collect()
+
+```
+
+## Prescription
+
+```{r}
+# create gaia-preg-----------------------------------------------------------
+pregnancies_cohort_pres <- pregnancies_cohort_23 |> 
+  left_join(gaia, by = "sip") |>  
+  tidylog::filter(fecha_receta >= fecha_inicio %m-% weeks(13), 
+         fecha_receta <= fecha_fin %m+% weeks(13)) |> 
+  mutate(
+    # 13wks before
+    fecha_inicio_13s_antes = fecha_inicio %m-% weeks(13),
+    fecha_fin_13s_antes = fecha_inicio %m-% days(1),
+    # first trim
+    fecha_inicio_1t = fecha_inicio,
+    fecha_fin_1t = if_else(
+      fecha_fin >= fecha_inicio %m+% days(97),
+      fecha_inicio %m+% days(97), fecha_fin),
+    # second trim     
+    fecha_inicio_2t = if_else(
+    fecha_fin >= fecha_inicio %m+% days(98),
+      fecha_inicio %m+% days(98), NA_Date_),
+    fecha_fin_2t = if_else(
+      fecha_fin >= fecha_inicio %m+% days(98),
+      pmin(fecha_inicio %m+% days(195), fecha_fin), NA_Date_),
+    # third trim
+    fecha_inicio_3t = if_else(
+      fecha_fin >= fecha_inicio %m+% days(196),
+      fecha_inicio %m+% days(196), NA_Date_),
+    fecha_fin_3t = if_else(
+      fecha_fin >= fecha_inicio %m+% days(196),
+      fecha_fin, NA_Date_),
+    # 13wks after
+    fecha_inicio_13s_despues = fecha_fin %m+% days(1),
+    fecha_fin_13s_despues = fecha_fin %m+% weeks(13)
+    ) |>
+  mutate(periodo_exposicion = case_when(
+    between(fecha_receta, fecha_inicio_13s_antes, fecha_fin_13s_antes) ~ 0,
+    between(fecha_receta, fecha_inicio_1t, fecha_fin_1t) ~ 1,
+    between(fecha_receta, fecha_inicio_2t, fecha_fin_2t) ~ 2,
+    between(fecha_receta, fecha_inicio_3t, fecha_fin_3t) ~ 3,
+    between(fecha_receta, fecha_inicio_13s_despues, fecha_fin_13s_despues) ~ 4))
+
+pregnancies_cohort_pres |> tabyl(periodo_exposicion)
+
+```
+
+
+```{r}
+# at least one prescription--------------------------------------------------
+pregnancies_cohort_pres |>
+  tidylog::filter(periodo_exposicion %in% 1:3) |> 
+  tidylog::distinct(sip, fecha_inicio)
+
+pregnancies_cohort_pres2 <- pregnancies_cohort_pres |>
+  tidylog::filter(periodo_exposicion %in% 1:3) |> 
+  group_by(sip, fecha_inicio) |> 
+  summarise(n_prin_act_cod_pres = n_distinct(prin_act_cod))
+
+pregnancies_cohort_24 <- pregnancies_cohort_23 |>
+  left_join(pregnancies_cohort_pres2) |> 
+  mutate(n_prin_act_cod_pres = if_else(is.na(n_prin_act_cod_pres), 
+                                       0, n_prin_act_cod_pres)) |> 
+  mutate(
+  at_least_one_drug_pres = if_else(n_prin_act_cod_pres > 0, 1, 0))
+
+pregnancies_cohort_24 |> tabyl(at_least_one_drug_pres)
+
+```
+
+## Dispensing
+
+```{r}
+# at least one prescription--------------------------------------------------
+pregnancies_cohort_disp <- pregnancies_cohort_pres |>
+  tidylog::filter(periodo_exposicion %in% 1:3) |> 
+  tidylog::filter(tipo_receta != "prescription") |> 
+  group_by(sip, fecha_inicio) |> 
+  summarise(n_prin_act_cod_disp = n_distinct(prin_act_cod))
+
+pregnancies_cohort_25 <- pregnancies_cohort_24 |>
+  left_join(pregnancies_cohort_disp) |> 
+  mutate(n_prin_act_cod_disp = if_else(is.na(n_prin_act_cod_disp), 
+                                       0, n_prin_act_cod_disp)) |> 
+  mutate(
+  at_least_one_drug_disp = if_else(n_prin_act_cod_disp > 0, 1, 0))
+
+pregnancies_cohort_25 |> tabyl(at_least_one_drug_disp)
+
+pregnancies_cohort_25 |> summarise(
+  mean(n_prin_act_cod_pres),
+  mean(n_prin_act_cod_disp),
+  sd(n_prin_act_cod_pres),
+  sd(n_prin_act_cod_disp))
+
+```
+
+```{r}
+# add previous use of drug---------------------------------------------------
+pregnancies_cohort_disp_use <- pregnancies_cohort_pres |>
+  tidylog::filter(tipo_receta != "prescription") |> 
+  tidylog::filter(periodo_exposicion == 0) |> 
+  distinct(sip, fecha_inicio) |> 
+  mutate(prev_drug_use = 1)
+
+pregnancies_cohort_26 <- pregnancies_cohort_25 |>
+  left_join(pregnancies_cohort_disp_use) |> 
+  mutate(prev_drug_use = if_else(is.na(prev_drug_use), 0, prev_drug_use))
+
+pregnancies_cohort_26 |> tabyl(prev_drug_use)
+
+```
+
+
+# Save base
+
+```{r}
+pregnancies_cohort_table_6m_lookback <- pregnancies_cohort_26
+
+```
+
+```{r}
+# change the misclassified imputed pregnancies
+pregnancies_cohort_table_6m_lookback_0 <- readRDS(file.path(procesados, 
+                                  "pregnancy_algorithm",
+                                  "pregnancies_cohort_table_6m_lookback.RDS"))
+
+pregnancies_cohort_table_6m_lookback_0 |> filter(sip %in% 
+                  c("VZyDjt87ZXA4+Mq8WPq2yA==", 
+                    "l8Uv10Q1vEJJdZ8HYWFA9Q=="))
+
+pregnancies_misclasified_as_imputed <- c(
+# con peso
+  230913,
+  336913,
+# preterm
+  56553,
+  437855,
+  437916,
+  438072)
+
+pregnancies_cohort_table_6m_lookback <- pregnancies_cohort_table_6m_lookback_0 |> 
+  mutate(imputed = if_else(pregnancy_id %in% pregnancies_misclasified_as_imputed,
+                           "no", imputed))
+
+# check
+pregnancies_cohort_table_6m_lookback |> 
+  filter(pregnancy_id %in% pregnancies_misclasified_as_imputed)
+
+# OK
+
+```
+
+
+```{r}
+saveRDS(pregnancies_cohort_table_6m_lookback, file.path(procesados, "pregnancy_algorithm",
+                                  "pregnancies_cohort_table_6m_lookback.RDS"))
+
+```
+
+## Trimesters
+
+- Trimester 1: from Last Menstrual Period (LMP) to day < 98 after LMP; or end of pregnancy, whichever earlier
+- Trimester 2: from day 98 after LMP to day <196 after LMP; or end of pregnancy, whichever earlier
+- Trimester 3: from day 196 after LMP onwards until end of pregnancy
+
+```{r}
+#| include: false
+# copy .qmd to CERES---------------------------------------------------------
+unlink(file.path("r:", "PREGVAL", "2-SCRIPTS", 
+                 "3_43_PREGVAL_Cohort_Profile_Results_6m_lookback.qmd"))
+file.copy(from = file.path(
+          "3_43_PREGVAL_Cohort_Profile_Results_6m_lookback.qmd"),
+          to = file.path("r:", "PREGVAL", "2-SCRIPTS"))
+
+```
+
+<div class="tocify-extend-page" data-unique="tocify-extend-page" style="height: 0;"></div>
