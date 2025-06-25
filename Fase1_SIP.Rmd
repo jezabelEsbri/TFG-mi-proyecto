@@ -1,0 +1,371 @@
+---
+title: "Fase 1 Base de SIP"
+output:
+  html_document:
+    toc: true
+    theme: united
+    df_print: paged
+---
+
+```{r, include=FALSE}
+# Configurar las opciones globalmente para todo el documento
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+```
+
+```{r, options(warn=-1), echo=FALSE}
+suppressWarnings({
+library(ggplot2)
+library(dplyr)
+library(plotly)
+library(kableExtra)
+library(haven)
+library(reactable)
+library(grid)
+library(gridExtra)
+library(patchwork)
+library(paletteer)
+library(haven)
+library(tidyr)
+library(DT)
+library(data.table)
+library(arrow)
+library(tidyverse)
+library(lubridate)
+})
+
+
+```
+
+### Base de datos:
+```{r,echo=FALSE,eval=FALSE}
+# Especificar la ruta del archivo Parquet
+ruta_archivo <- "E:/EMBARAZO/PREGVAL/1-DATOS/1-BRUTOS/01_SIP/CORTE_2018_2021/V99/SD2479_SIP_SPO_5564_2021_Datos_out.enc.txt"
+
+data_unidaSIP <- fread(ruta_archivo, sep='|')
+names(data_unidaSIP) <- tolower(names(data_unidaSIP))
+head(data_unidaSIP)
+
+```
+
+
+
+
+
+```{r,echo=FALSE, eval=FALSE}
+# Lista de variables esperadas
+variables_esperadas <- c(
+  "sip",  "fecha_calculo", "fecha_nacimiento",  "sexo", "pais_nacimiento", 
+  "sit_empadronamiento", 
+  "derecho_farmacia", "dpto_salud",  "zona_salud",  "fecha_alta", 
+  "fecha_baja", "causa_baja",  "fecha_defuncion",  "raf_ilimi",  "raf_ipago",  "apsig", 
+  "mod_acred",  "residencia_cod_desc",  "centro_cod_desc", "clave_medica", 
+  "codigo_postal",  "nif_profesional",   "causa_alta"
+)
+
+
+# Definir los tipos de datos esperados
+tipos_esperados <- list(
+  sip = "character",  # VARCHAR
+  fecha_calculo = "Date",  # DATE
+  fecha_nacimiento = "Date",  # DATE
+  fecha_defuncion = "Date",  # DATE
+  sexo = "character",  # VARCHAR
+  pais_nacimiento = "character",  # VARCHAR
+  dpto_salud = "integer",  # INT
+  zona_salud = "integer",  # INT
+  centro_cod = "integer",  # INT
+  codigo_postal = "integer",  # INT
+  fecha_alta = "Date",  # DATE
+  causa_alta = "character",  # VARCHAR
+  fecha_baja = "Date",  # DATE
+  causa_baja = "character",  # VARCHAR
+  sit_empadronamiento = "integer",  # INT
+  derecho_farmacia = "character",  # VARCHAR
+  raf_ipago = "character",  # VARCHAR
+  raf_ilimi = "integer",  # INT
+  apsig = "character"  ,# VARCHAR,
+  mod_acred = "character",  # DATE
+  residencia_cod_desc = "integer",  # VARCHAR
+  centro_cod_desc = "integer",  # INT
+  clave_medica = "character",  # VARCHAR
+  codigo_postal = "integer",  # VARCHAR
+  nif_profesional = "character",  # INT
+  causa_alta = "character"  # VARCHAR
+)
+
+
+renombrar_variables <- function(data, variables_esperadas, capturar_salida = TRUE) {
+  nombres_actuales <- names(data)
+  faltantes <- setdiff(variables_esperadas, nombres_actuales)
+  
+  if (length(faltantes) == 0) {
+    message("Todas las variables esperadas ya están presentes en la base de datos.")
+    return(data)
+  }
+  
+  if (capturar_salida) {
+    capture.output({
+      cat("Las variables en la base de datos son:\n")
+      print(nombres_actuales)
+    })
+  } else {
+    cat("Las variables en la base de datos son:\n")
+    print(nombres_actuales)
+  }
+  
+  for (var in faltantes) {
+    repeat {
+      if (capturar_salida) {
+        sink(tempfile())  # Redirigir la salida
+        antiguo_nombre <- readline(prompt = paste("Introduce el nombre de la variable correspondiente para '", var, "' (o deja en blanco para omitir): "))
+        sink()  # Restaurar la salida
+      } else {
+        antiguo_nombre <- readline(prompt = paste("Introduce el nombre de la variable correspondiente para '", var, "' (o deja en blanco para omitir): "))
+      }
+      
+      if (antiguo_nombre %in% nombres_actuales) {
+        names(data)[names(data) == antiguo_nombre] <- var
+        nombres_actuales <- names(data)  # Actualiza la lista de nombres
+        
+        if (capturar_salida) {
+          capture.output(cat("Se ha renombrado", antiguo_nombre, "a", var, "\n"))
+        } else {
+          cat("Se ha renombrado", antiguo_nombre, "a", var, "\n")
+        }
+        
+        break
+      } else if (antiguo_nombre == "") {
+        if (capturar_salida) {
+          capture.output(cat("Se omite la variable '", var, "'\n"))
+        } else {
+          cat("Se omite la variable '", var, "'\n")
+        }
+        
+        break
+      } else {
+        if (capturar_salida) {
+          capture.output(cat("Nombre no encontrado en la base de datos. Inténtalo de nuevo.\n"))
+        } else {
+          cat("Nombre no encontrado en la base de datos. Inténtalo de nuevo.\n")
+        }
+      }
+    }
+  }
+  faltantes <- setdiff(variables_esperadas, nombres_actuales)
+  if (capturar_salida) {
+    capture.output({
+      cat("Las siguientes variables faltan en la base de datos:\n")
+      print(faltantes)
+    })
+  } else {
+    cat("Las siguientes variables faltan en la base de datos:\n")
+    print(faltantes)
+  }
+  
+  return(data)
+}
+# Ejecutar la función sin que imprima mensajes en el HTML
+suppressMessages(suppressWarnings({
+  data_unidaSIP <- renombrar_variables(data_unidaSIP, variables_esperadas, capturar_salida = knitr::is_html_output())
+}))
+#ruta_archivo1=''
+#fwrite(data_unidaSIP, ruta_archivo, sep = "|", quote = FALSE, row.names = FALSE)
+```
+
+
+```{r,echo=FALSE}
+
+#función que comprueba que estén en el formato que toca
+verificar_tipos <- function(data, tipos_esperados) {
+  data_incorrectas <- c()
+  
+  for (var in names(tipos_esperados)) {
+    if (var %in% colnames(data)) {
+      
+      tipo_actual <- class(data[[var]])[1]
+      
+      if (tipo_actual != tipos_esperados[[var]]) {
+        data_incorrectas <- c(data_incorrectas, var)
+      }
+    } 
+  }
+  
+  return(data_incorrectas)
+}
+
+
+tabla <- function(data, variables_esperadas, tipos_esperados) {
+  incorrectas <- verificar_tipos(data, tipos_esperados)
+  
+  # para calcular faltantes tipos etc solo de las existgentes:
+  variables_existentes <- intersect(variables_esperadas, colnames(data))
+  variables_faltantes <- setdiff(variables_esperadas, colnames(data))
+  
+  if (length(variables_existentes) > 0) {
+    faltantes <- data %>%
+      select(all_of(variables_existentes)) %>%
+      summarise(across(
+        everything(), 
+        ~ {
+  if (inherits(., "Date")) {
+    mean(is.na(.)) * 100
+  } else if (is.character(.)) {
+    mean(is.na(.) | . == "0" | . == "") * 100
+  } else {
+    mean(is.na(.)) * 100
+  }
+}
+      )) %>%
+      pivot_longer(cols = everything(), names_to = "Variable", values_to = "Porcentaje_Faltantes")
+    
+    tipos_variables <- data %>%
+      summarise(across(all_of(variables_existentes), ~ class(.)[1])) %>%
+      pivot_longer(cols = everything(), names_to = "Variable", values_to = "Tipo_Variable")
+    
+    duplicados <- data %>%
+      select(all_of(variables_existentes)) %>%
+      summarise(across(everything(), 
+                       ~ sum(duplicated(.) & !duplicated(., fromLast = TRUE)) / n_distinct(.) * 100)) %>%  
+      pivot_longer(cols = everything(), names_to = "Variable", values_to = "Porcentaje_Duplicados")
+    
+    resultado <- full_join(faltantes, tipos_variables, by = "Variable") %>%
+      full_join(duplicados, by = "Variable") #une tablas
+  } else {
+    resultado <- tibble(
+      Variable = character(),
+      Porcentaje_Faltantes = numeric(),
+      Tipo_Variable = character(),
+      Porcentaje_Duplicados = numeric()
+    )
+  }
+  
+  # Rellenar las columnas para las que faltan
+  if (length(variables_faltantes) > 0) {
+    faltantes_extra <- tibble(
+      Variable = variables_faltantes,
+      Porcentaje_Faltantes = NA,
+      Tipo_Variable = NA,
+      Porcentaje_Duplicados = NA
+    )
+    resultado <- bind_rows(resultado, faltantes_extra)
+  }
+  
+  resultado <- resultado %>%
+    mutate(En_Data = ifelse(Variable %in% variables_existentes, "Sí", "No")) %>%
+    mutate(Formato_Correcto = ifelse(Variable %in% variables_existentes, 
+                                     ifelse(Variable %in% incorrectas, "No", "Sí"), 
+                                     NA))
+  
+  # Crear la tabla interactiva con formato
+  datatable(resultado, 
+            options = list(pageLength = 10, searchable = TRUE, 
+                           autoWidth = TRUE,  #ancho column
+                           columnDefs = list(list(targets = "_all", className = 'dt-left')), width = "50"),  # Alineación a la izquierda
+            extensions = 'Buttons') %>% 
+    formatRound(columns = c("Porcentaje_Faltantes", "Porcentaje_Duplicados"), digits = 2) %>%
+    formatStyle(
+      'En_Data', 
+      color = styleEqual("No", 'red'),  # Cambiar color de las letras a rojo si es "No"
+      fontWeight = 'bold'
+    ) %>%
+    formatStyle(
+      'Formato_Correcto', 
+      color = styleEqual("No", 'red'),  # Cambiar color de las letras a rojo si es "No"
+      fontWeight = 'bold'
+    ) %>%
+    formatStyle(
+      'Porcentaje_Faltantes',
+      color = styleInterval(0.1, c('black', 'red'))  
+    )
+}
+
+
+```
+
+
+## Tabla resumen variables
+```{r}
+tabla(data_unidaSIP,variables_esperadas,tipos_esperados)
+
+```
+
+```{r}
+variables_en_base <- names(data_unidaSIP)
+
+otras_variables <- setdiff(variables_en_base, variables_esperadas)
+
+if (length(otras_variables) > 0) {
+  cat("Otras variables que aparecen en la base de datos:", paste(otras_variables, collapse=", "), "\n")
+} else {
+  cat("Vacio\n")
+}
+
+```
+
+
+
+
+## Tabla comprobaciones fechas
+
+Para las comprobaciones, se pasan todas las fechas a formato fecha.
+```{r,echo=FALSE}
+
+# Definir formatos posibles para las fechas
+formatos_posibles <- c("Ymd", "dmy", "mdy", "ymd HMS", "dmy HMS", "mdy HMS")
+
+# Convertir solo las variables de fecha que existen en data_unidaSIP
+variables_fechas <- c("fecha_nacimiento", "fecha_alta", "fecha_baja", "fecha_calculo", "fecha_defuncion")
+
+for (var in variables_fechas) {
+  if (var %in% names(data_unidaSIP)) {
+    data_unidaSIP[[var]] <- parse_date_time(data_unidaSIP[[var]], orders = formatos_posibles)
+  }
+}
+
+comprobaciones <- tibble(
+  comprobacion = character(),
+  porcentaje_cumplimiento = numeric()
+)
+
+# Comprobación 1: fecha_nacimiento < fecha_alta
+cumple_fecha_nacimiento_alta <- sum(data_unidaSIP$fecha_nacimiento < data_unidaSIP$fecha_alta, na.rm = TRUE) / nrow(data_unidaSIP) * 100
+comprobaciones <- rbind(comprobaciones, tibble(comprobacion = "fecha_nacimiento < fecha_alta", porcentaje_cumplimiento = cumple_fecha_nacimiento_alta))
+
+# Comprobación 2: fecha_nacimiento < fecha_baja (si existe fecha_baja)
+cumple_fecha_nacimiento_baja <- sum(data_unidaSIP$fecha_nacimiento < data_unidaSIP$fecha_baja, na.rm = TRUE) / sum(!is.na(data_unidaSIP$fecha_baja)) * 100
+comprobaciones <- rbind(comprobaciones, tibble(comprobacion = "fecha_nacimiento < fecha_baja", porcentaje_cumplimiento = cumple_fecha_nacimiento_baja))
+
+# Comprobación 3: fecha_nacimiento < fecha_calculo
+cumple_fecha_nacimiento_calculo <- sum(data_unidaSIP$fecha_nacimiento < data_unidaSIP$fecha_calculo, na.rm = TRUE) / nrow(data_unidaSIP) * 100
+comprobaciones <- rbind(comprobaciones, tibble(comprobacion = "fecha_nacimiento < fecha_calculo", porcentaje_cumplimiento = cumple_fecha_nacimiento_calculo))
+
+# Comprobación 4: fecha_alta < fecha_baja (si existe fecha_baja)
+cumple_fecha_alta_baja <- sum(data_unidaSIP$fecha_alta < data_unidaSIP$fecha_baja, na.rm = TRUE) / sum(!is.na(data_unidaSIP$fecha_baja)) * 100
+comprobaciones <- rbind(comprobaciones, tibble(comprobacion = "fecha_alta < fecha_baja", porcentaje_cumplimiento = cumple_fecha_alta_baja))
+
+# Comprobación 5: fecha_defuncion > fecha_alta
+cumple_fecha_defuncion_alta <- sum(data_unidaSIP$fecha_defuncion > data_unidaSIP$fecha_alta, na.rm = TRUE) / sum(!is.na(data_unidaSIP$fecha_defuncion)) * 100
+comprobaciones <- rbind(comprobaciones, tibble(comprobacion = "fecha_defuncion > fecha_alta", porcentaje_cumplimiento = cumple_fecha_defuncion_alta))
+
+
+# Comprobación 7: fecha_defuncion > fecha_nacimiento
+cumple_fecha_defuncion_nacimiento <- sum(data_unidaSIP$fecha_defuncion > data_unidaSIP$fecha_nacimiento, na.rm = TRUE) / sum(!is.na(data_unidaSIP$fecha_defuncion)) * 100
+comprobaciones <- rbind(comprobaciones, tibble(comprobacion = "fecha_defuncion > fecha_nacimiento", porcentaje_cumplimiento = cumple_fecha_defuncion_nacimiento))
+
+# Mostrar la tabla final
+datatable(comprobaciones, 
+          options = list(pageLength = 10, searchable = TRUE, 
+                         autoWidth = TRUE,  # Ancho de columnas
+                         columnDefs = list(list(targets = "_all", className = 'dt-left')), 
+                         width = "50"),  # Alineación a la izquierda
+          extensions = 'Buttons') %>% 
+  formatRound(columns = "porcentaje_cumplimiento", digits = 2) %>%  # Redondear el porcentaje a 2 decimales
+  formatStyle(
+    'porcentaje_cumplimiento', 
+    color = styleInterval(95, c('red', 'black'))  # Cambiar color a rojo si el porcentaje es menor que 95%
+  )
+
+```
+
+
+

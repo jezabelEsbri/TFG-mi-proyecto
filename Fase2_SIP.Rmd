@@ -1,0 +1,493 @@
+---
+title: "Fase 2 Base de SIP"
+output:
+  html_document:
+    toc: true
+    theme: united
+    df_print: paged
+---
+
+```{r, include=FALSE}
+# Configurar las opciones globalmente para todo el documento
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+```
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(plotly)
+library(kableExtra)
+library(haven)
+library(reactable)
+library(grid)
+library(gridExtra)
+library(patchwork)
+library(paletteer)
+library(haven)
+library(tidyr)
+library(DT)
+library(crosstalk)
+library(arrow)
+library(data.table)
+library(forcats)
+library(tidyverse)
+library(lubridate)
+
+
+
+```
+
+aquí se van añadiendo cada año solo sips nuevos: 
+```{r,eval = FALSE}
+ruta_base <- 'E:/EMBARAZO/PREGVAL/1-DATOS/2-INTERMEDIOS/01_SIP/'
+
+archivos <- paste0(ruta_base, "year_fecha_calculo=", 2009:2021, "/part-0.parquet")
+
+# Crear un vector para acumular los SIPS únicos
+sips_existentes <- character()
+data_unidaSIP <- list()
+
+for (archivo in archivos) {
+  df <- read_parquet(archivo)
+  
+  # Filtrar solo SIPS nuevos
+  df_nuevos <- df %>% filter(!sip %in% sips_existentes)
+  
+  # Agregar los nuevos SIPS a la lista acumulada
+  sips_existentes <- c(sips_existentes, df_nuevos$sip)
+  
+  # Guardar el dataframe filtrado
+  data_unidaSIP[[length(data_unidaSIP) + 1]] <- df_nuevos
+}
+
+# Unir todo en un solo dataframe
+data_unidaSIP <- bind_rows(data_unidaSIP)
+```
+
+aquí solo cargamos el último año:
+```{r}
+#leer el archivo en el formato que esté:
+data_unidaSIP <- read_parquet("E:/EMBARAZO/PREGVAL/1-DATOS/2-INTERMEDIOS/01_SIP/year_fecha_calculo=2021/part-0.parquet")
+
+
+setDT(data_unidaSIP)
+head(data_unidaSIP)
+```
+
+
+```{r}
+c <- c(
+  "#cce7df",   
+  "#93a29e",
+  "#b7ded2",   
+  "#a4c7bd",  
+  "#92b1a8",   
+  "#809b93", 
+  "#bfb5b2", 
+  "#6d857e",   
+  "#5b6f69",   
+  "#495854"   
+)
+```
+
+### Tabla poblacional
+Conteo y por porcentaje de cada población.
+```{r, fig.width=16, fig.height=6}
+
+# Verificar si las variables clave existen
+if (all(c("fecha_nacimiento", "fecha_calculo", "sexo") %in% names(data_unidaSIP))) {
+  
+  #edad
+  data_unidaSIP <- data_unidaSIP %>%
+    mutate(
+      fecha_nacimiento = as.Date(fecha_nacimiento),
+      fecha_calculo = as.Date(fecha_calculo),
+      edad = as.integer(format(fecha_calculo, "%Y")) - as.integer(format(fecha_nacimiento, "%Y")) -
+             ifelse(format(fecha_calculo, "%m-%d") < format(fecha_nacimiento, "%m-%d"), 1, 0)
+    )
+  
+  #aquí si sexo está como 1 (hombre) 2 (muejr) o M y H
+  Pir_ER_contado <- data_unidaSIP %>%
+    mutate(
+      sexo = case_when(
+        sexo %in% c("1", "2") ~ recode(sexo, '1' = "Hombre", '2' = "Mujer"),
+        sexo %in% c("M", "H") ~ recode(sexo, 'H' = "Hombre", 'M' = "Mujer"),
+        TRUE ~ as.character(sexo)
+      )
+    ) %>%
+    filter(edad >= 0 & edad <= 110) %>%
+    count(edad, sexo)
+
+  # Invertir los valores para mujeres (negativos) xa el gráfico
+  Pir_ER_contado <- Pir_ER_contado %>%
+    mutate(Poblacion = ifelse(sexo == "Mujer", -n, n))
+
+  # Crear pirámide poblacional en valores absolutos
+  g1 <- ggplot(Pir_ER_contado, aes(x = edad, y = Poblacion, fill = sexo)) +
+    geom_bar(stat = "identity", width = 0.8) +
+    scale_x_continuous(labels = seq(0, 100, 5), breaks = seq(0, 100, 5), limits = c(0, 100)) +
+    scale_y_continuous(labels = abs, name = "Población") +
+    labs(y = "Población", x = "Edad", title = "Pirámide Poblacional", 
+         subtitle = "Distribución por Sexo y Edad", caption = "Fuente: Datos") +
+    scale_fill_manual(values = c("Mujer" = "#b7ded2", "Hombre" = "#93a29e")) +
+    theme_minimal() +
+    theme(legend.position = "top") +
+    guides(fill = guide_legend(title = "Género")) +
+    coord_flip()
+
+  # Calcular distribución por edad y sexo en porcentaje
+  Pir_ER <- data_unidaSIP %>%
+    mutate(
+      sexo = case_when(
+        sexo %in% c("1", "2") ~ recode(sexo, '1' = "Hombre", '2' = "Mujer"),
+        sexo %in% c("M", "H") ~ recode(sexo, 'H' = "Hombre", 'M' = "Mujer"),
+        TRUE ~ as.character(sexo)
+      )
+    ) %>%
+    filter(edad >= 0 & edad <= 110) %>%
+    count(edad, sexo) %>%
+    group_by(sexo) %>%
+    mutate(Np = round(n / sum(n) * 100, 2)) %>%
+    ungroup() %>%
+    mutate(Np = ifelse(sexo == "Mujer", -Np, Np))
+
+  # Crear pirámide poblacional en porcentaje
+  g2 <- ggplot(Pir_ER, aes(x = edad, y = Np, fill = sexo)) +
+    geom_bar(stat = "identity", width = 1, color = "black") +
+    coord_flip() +
+    scale_y_continuous(labels = abs, limits = c(-max(abs(Pir_ER$Np)), max(Pir_ER$Np))) +
+    scale_x_continuous(breaks = seq(0, 110, 5), limits = c(0, 110)) +
+    labs(y = "Porcentaje de Población", x = "Edad", title = "Pirámide de Población",
+         subtitle = "Distribución por Sexo y Edad", caption = "Fuente: en base a INDEC") +
+    scale_fill_manual(values = c("Mujer" = "#b7ded2", "Hombre" = "#93a29e")) +
+    theme_bw()
+
+  # Mostrar los gráficos juntos
+  g1 + g2
+
+} else {
+print("Una de las variables necesarias (fecha_nacimiento, fecha_calculo o sexo) no está en la base de datos.")
+}
+```
+
+
+
+
+## CATEGÓRICAS
+
+
+### País de nacimiento, código postal, situación de empadronamiento y residencia
+```{r}
+if("pais_nacimiento" %in% colnames(data_unidaSIP)) {
+p <- ggplot(data_unidaSIP, aes(x = fct_infreq(factor(pais_nacimiento)), fill = factor(pais_nacimiento))) +
+  geom_bar() +  
+  scale_fill_manual(
+    values = c[1:length(unique(data_unidaSIP$pais_nacimiento))]) +  
+  labs(x = "pais_nacimiento", y = "Frecuencia") +  
+  theme_classic() +  
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))  + 
+    # Limitar las categorías a las 15 más frecuentes
+  scale_x_discrete(limits = names(sort(table(data_unidaSIP$pais_nacimiento), decreasing = TRUE))[1:15])
+  
+
+}else {
+  print("La variable 'pais_nacimiento' no existe en los datos.")
+}
+
+```
+
+
+```{r}
+if("codigo_postal" %in% colnames(data_unidaSIP)) {
+p1 <- ggplot(data_unidaSIP, aes(x = fct_infreq(factor(codigo_postal)), fill = factor(codigo_postal))) +
+  geom_bar() +  
+  scale_fill_manual(
+    values = c[1:length(unique(data_unidaSIP$codigo_postal))]) +  
+  labs(x = "codigo_postal", y = "Frecuencia") +  
+  theme_classic() +  
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))  + 
+    # Limitar las categorías a las 15 más frecuentes
+  scale_x_discrete(limits = names(sort(table(data_unidaSIP$codigo_postal), decreasing = TRUE))[1:15])
+  
+
+}else {
+  print("La variable 'codigo_postal' no existe en los datos.")
+}
+
+```
+
+
+```{r}
+if("sit_empadronamiento" %in% colnames(data_unidaSIP)) {
+p2 <- ggplot(data_unidaSIP, aes(x = fct_infreq(factor(sit_empadronamiento)), fill = factor(sit_empadronamiento))) +
+  geom_bar() +  
+  scale_fill_manual(
+    values = c[1:length(unique(data_unidaSIP$sit_empadronamiento))]) +  
+  labs(x = "sit_empadronamiento", y = "Frecuencia") +  
+  theme_classic() +  
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))  
+
+}else {
+  print("La variable 'sit_empadronamiento' no existe en los datos.")
+}
+```
+
+```{r}
+if("residencia_cod_desc" %in% colnames(data_unidaSIP)) {
+pR <- ggplot(data_unidaSIP, aes(x = fct_infreq(factor(residencia_cod_desc)), fill = factor(residencia_cod_desc))) +
+  geom_bar() +  
+  scale_fill_manual(
+    values = c[1:length(unique(data_unidaSIP$residencia_cod_desc))]) +  
+  labs(x = "residencia_cod_desc", y = "Frecuencia") +  
+  theme_classic() +  
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))  + 
+    # Limitar las categorías a las 15 más frecuentes
+  scale_x_discrete(limits = names(sort(table(data_unidaSIP$residencia_cod_desc), decreasing = TRUE))[1:15])
+  
+
+}else {
+  print("La variable 'residencia_cod_desc' no existe en los datos.")
+}
+```
+
+
+```{r, fig.width=16, fig.height=6}
+library(patchwork)
+# Verificar si los gráficos existen antes de graficarlos
+if (exists("p") & exists("p1") & exists("p2") & exists("pR")) {
+  (p + p1 + plot_layout(ncol = 2, widths = c(1, 1))) 
+  (p2 + pR + plot_layout(ncol = 2, widths = c(1, 1)))
+} else if (exists("p") & exists("p1") & exists("p2")) {
+  p + p1 + plot_layout(ncol = 2, widths = c(1, 1)) 
+  p2
+} else if (exists("p") & exists("p1") & exists("pR")) {
+  p + p1 + plot_layout(ncol = 2, widths = c(1, 1)) 
+  pR
+} else if (exists("p") & exists("p2") & exists("pR")) {
+  p + p2 + plot_layout(ncol = 2, widths = c(1, 1))
+  pR
+} else if (exists("p1") & exists("p2") & exists("pR")) {
+  p1 + p2 + plot_layout(ncol = 2, widths = c(1, 1))
+  pR
+} else if (exists("p") & exists("p1")) {
+  p + p1 + plot_layout(ncol = 2, widths = c(1, 1))
+} else if (exists("p") & exists("p2")) {
+  p + p2 + plot_layout(ncol = 2, widths = c(1, 1))
+} else if (exists("p") & exists("pR")) {
+  p + pR + plot_layout(ncol = 2, widths = c(1, 1))
+} else if (exists("p1") & exists("p2")) {
+  p1 + p2 + plot_layout(ncol = 2, widths = c(1, 1))
+} else if (exists("p1") & exists("pR")) {
+  p1 + pR + plot_layout(ncol = 2, widths = c(1, 1))
+} else if (exists("p2") & exists("pR")) {
+  p2 + pR + plot_layout(ncol = 2, widths = c(1, 1))
+} else if (exists("p")) {
+  p
+} else if (exists("p1")) {
+  p1
+} else if (exists("p2")) {
+  p2
+} else if (exists("pR")) {
+  pR
+} else {
+  print("Ningún gráfico está disponible.")
+}
+
+```
+
+### Departamento, zona y centro de salud
+```{r, echo=FALSE}
+if("dpto_salud" %in% colnames(data_unidaSIP)) {
+p3 <- ggplot(data_unidaSIP, aes(x = fct_infreq(factor(dpto_salud)), fill = factor(dpto_salud))) +
+  geom_bar() +  
+  scale_fill_manual(
+    values = c[1:length(unique(data_unidaSIP$dpto_salud))]) +  
+  labs(x = "dpto_salud", y = "Frecuencia") +  
+  theme_classic() +  
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))  + 
+    # Limitar las categorías a las 15 más frecuentes
+  scale_x_discrete(limits = names(sort(table(data_unidaSIP$dpto_salud), decreasing = TRUE))[1:15])
+  
+
+}else {
+  print("La variable 'dpto_salud' no existe en los datos.")
+}
+
+```
+
+```{r, echo=FALSE}
+if("zona_salud" %in% colnames(data_unidaSIP)) {
+p4 <- ggplot(data_unidaSIP, aes(x = fct_infreq(factor(zona_salud)), fill = factor(zona_salud))) +
+  geom_bar() +  
+  scale_fill_manual(
+    values = c[1:length(unique(data_unidaSIP$zona_salud))]) +  
+  labs(x = "zona_salud", y = "Frecuencia") +  
+  theme_classic() +  
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))  + 
+    # Limitar las categorías a las 15 más frecuentes
+  scale_x_discrete(limits = names(sort(table(data_unidaSIP$zona_salud), decreasing = TRUE))[1:15])
+  
+
+}else {
+  print("La variable 'zona_salud' no existe en los datos.")
+}
+
+```
+
+```{r, echo=FALSE}
+if("centro_cod_desc" %in% colnames(data_unidaSIP)) {
+p5 <- ggplot(data_unidaSIP, aes(x = fct_infreq(factor(centro_cod_desc)), fill = factor(centro_cod_desc))) +
+  geom_bar() +  
+  scale_fill_manual(
+    values = c[1:length(unique(data_unidaSIP$centro_cod_desc))]) +  
+  labs(x = "centro_cod_desc", y = "Frecuencia") +  
+  theme_classic() +  
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))  + 
+    # Limitar las categorías a las 15 más frecuentes
+  scale_x_discrete(limits = names(sort(table(data_unidaSIP$centro_cod_desc), decreasing = TRUE))[1:15])
+  
+
+}else {
+  print("La variable 'centro_cod_desc' no existe en los datos.")
+}
+
+```
+
+
+
+
+```{r, fig.width=16, fig.height=6}
+
+library(patchwork)
+# Verificar si los gráficos existen antes de graficarlos
+if (exists("p3") & exists("p4") & exists("p5")) {
+  p3 + p4 + plot_layout(ncol = 2, widths = c(1, 1)) 
+  p5
+} else if (exists("p3") & exists("p4")) {
+  p3 + p4 + plot_layout(ncol = 2, widths = c(1, 1))
+} else if (exists("p3") & exists("p5")) {
+  p3 + p5 + plot_layout(ncol = 2, widths = c(1, 1))
+} else if (exists("p4") & exists("p5")) {
+  p4 + p5 + plot_layout(ncol = 2, widths = c(1, 1))
+} else if (exists("p3")) {
+  p3
+} else if (exists("p4")) {
+  p4
+} else if (exists("p5")) {
+  p5
+} else {
+  print("Ningún gráfico está disponible.")
+}
+
+```
+
+### Causas de las altas y bajas
+
+```{r, echo=FALSE, fig.width=10,fig.height=6}
+if("causa_baja" %in% colnames(data_unidaSIP)) {
+p6 <- ggplot(data_unidaSIP, aes(x = fct_infreq(factor(causa_baja)), fill = factor(causa_baja))) +
+  geom_bar() +  
+  scale_fill_manual(
+    values = c[1:length(unique(data_unidaSIP$causa_baja))]) +  
+  labs(x = "causa_baja", y = "Frecuencia") +  
+  theme_classic() +  
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))  + 
+    # Limitar las categorías a las 15 más frecuentes
+  scale_x_discrete(limits = names(sort(table(data_unidaSIP$causa_baja), decreasing = TRUE))[1:10])
+
+}else {
+  print("La variable 'causa_baja' no existe en los datos.")
+}
+
+```
+
+
+```{r, echo=FALSE, fig.width=10,fig.height=6}
+if("causa_alta" %in% colnames(data_unidaSIP)) {
+p7 <- ggplot(data_unidaSIP, aes(x = fct_infreq(factor(causa_alta)), fill = factor(causa_alta))) +
+  geom_bar() +  
+  scale_fill_manual(
+    values = c[1:length(unique(data_unidaSIP$causa_alta))]) +  
+  labs(x = "causa_alta", y = "Frecuencia") +  
+  theme_classic() +  
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))  + 
+    # Limitar las categorías a las 15 más frecuentes
+  scale_x_discrete(limits = names(sort(table(data_unidaSIP$causa_alta), decreasing = TRUE))[1:10])
+
+}else {
+  print("La variable 'causa_alta' no existe en los datos.")
+}
+
+```
+```{r,fig.width=16}
+if (exists("p6") & exists("p7")) {
+  p6 + p7 + plot_layout(ncol = 2, widths = c(1, 1))
+} else if (exists("p6")) {
+  p6
+} else if (exists("p7")) {
+  p7
+} else {
+  print("Ningún gráfico está disponible.")
+}
+```
+
+### Límite copago
+
+
+```{r}
+if ("raf_ipago" %in% names(data_unidaSIP)) {
+  
+  # Agrupar la variable raf_ipago en categorías específicas
+  data_unidaSIP <- data_unidaSIP %>%
+    mutate(grupo_raf_ipago = case_when(
+      raf_ipago == "TSI 001" ~ "Exento",
+      raf_ipago %in% c("TSI 002", "TSI 005") ~ "Pensionista",
+      raf_ipago %in% c("TSI 003", "F 003", "TSI 004", "F 004", "TSI 005") ~ "Activo",
+      raf_ipago %in% c("TSI 006", "NOFAR") ~ "Sin derecho",
+      TRUE ~ "Otro"  # Categoría para valores no especificados
+    ))
+  
+  # Gráfico de barras con estética personalizada
+  ggplot(data_unidaSIP, aes(x = fct_infreq(factor(grupo_raf_ipago)), 
+                            fill = factor(grupo_raf_ipago))) +
+    geom_bar() +  
+    scale_fill_manual(values = c) +  
+    labs(x = "Grupo RAF IPAGO", y = "Frecuencia") +  
+    theme_classic() +  
+    theme(axis.text.x = element_text(angle = 45, hjust = 1)) 
+
+} else {
+  print(" La variable 'raf_ipago' no está en la base de datos.")
+}
+  
+```
+
+
+### Raf_ilimi, apsig, clave_medica y nif_profesional
+
+```{r}
+if (!inherits(data_unidaSIP$fecha_calculo, "Date")) {
+  data_unidaSIP$fecha_calculo <- as.Date(data_unidaSIP$fecha_calculo)
+}
+
+data_unidaSIP <- data_unidaSIP %>%
+  mutate(year = year(fecha_calculo))
+
+summary_table <- data_unidaSIP %>%
+  group_by(year) %>%
+  summarise(
+    count_apsig_CONTEO = if ("apsig" %in% colnames(data_unidaSIP)) n_distinct(apsig) else NA,
+    count_clave_medica_CONTEO = if ("clave_medica" %in% colnames(data_unidaSIP)) n_distinct(clave_medica) else NA,
+    count_nif_profesional_CONTEO = if ("nif_profesional" %in% colnames(data_unidaSIP)) n_distinct(nif_profesional) else NA
+  ) %>%
+  ungroup() %>%
+  pivot_longer(cols = c(count_apsig_CONTEO, count_clave_medica_CONTEO, count_nif_profesional_CONTEO),
+               names_to = "variable", values_to = "value") %>%
+  pivot_wider(names_from = "year", values_from = "value")
+
+summary_table %>%
+  kable(caption = "Resumen por Año", format = "html", digits = 2, align = 'c') %>%
+  kable_styling(full_width = TRUE, font_size = 12, bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+
