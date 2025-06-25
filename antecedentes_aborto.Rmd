@@ -1,0 +1,249 @@
+---
+title: "antecedente abortos"
+output: html_document
+date: "2025-06-03"
+---
+
+
+```{r, include=FALSE}
+# Configurar las opciones globalmente para todo el documento
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+```
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(plotly)
+library(kableExtra)
+library(haven)
+library(reactable)
+library(grid)
+library(gridExtra)
+library(patchwork)
+library(paletteer)
+library(haven)
+library(tidyr)
+library(DT)
+library(crosstalk)
+library(lubridate) 
+library(data.table)
+library(arrow)
+library(scales)
+library(forcats)
+library(stringr)
+library(purrr)
+library(ggrepel)
+library(gt)
+
+c <- c(
+  "#cce7df",  
+  "#93a29e",
+  "#b7ded2",  
+  "#a4c7bd",  
+  "#92b1a8",  
+  "#809b93",
+  "#bfb5b2" ,
+  "#6d857e",  
+  "#5b6f69",  
+  "#495854" ,"#bfb5b2" ,"#cce7df","#92b1a8","#495854" , "#a4c7bd")
+
+
+```
+```{r}
+pregnancies_cohort <- readRDS("E:/EMBARAZO/PREGVAL/1-DATOS/3-PROCESADOS/pregnancy_algorithm/pregnancies_cohort_table_6m_lookback.RDS") |> 
+  # obtain pregnancies from 01-07-2009
+  tidylog::filter(fecha_inicio >= ymd("2009-07-01"))  |>
+  distinct()
+pregnancies_cohort_hiper=pregnancies_cohort %>% filter(m_hypertension==1) %>% select(sip,embarazo_id=pregnancy_id,fecha_inicio) 
+```
+
+con aborto anterior en la base de pregnancies_cohort:
+
+```{r}
+abortos_previos <- pregnancies_cohort %>%
+  filter(tipo_fin == "spontaneous abortion") %>%
+  select(sip, fecha_fin)
+
+# Cruzar con pregnancies_cohort_hiper para marcar si hay aborto previo
+pregnancies_cohort_hiper <- pregnancies_cohort_hiper %>%
+  left_join(abortos_previos, by = "sip") %>%  #unepor el sip y a cada embarazo le une la fecha de aborto de esa persona (varias filas si tiene varios abortos)
+  mutate(prev_aborto_flag = ifelse(!is.na(fecha_fin) & fecha_fin < fecha_inicio, 1, 0)) %>%
+  group_by(sip, embarazo_id, fecha_inicio) %>%
+  summarise(prev_aborto = max(prev_aborto_flag, na.rm = TRUE), .groups = "drop") %>%#para cada embarazo (que puede estar asociado a varios abortos de esa persona) miras si tiene un 1 (alguno que se haya producido antes) y se le asigna a prev_aborto
+  
+  # Añadimos la variable de origen
+  mutate(origen_prev_aborto = ifelse(prev_aborto == 1, "pregnancies_cohort", NA)) %>%
+
+  # Volvemos a unir con la tabla original para recuperar todas las filas
+  right_join(pregnancies_cohort_hiper, by = c("sip", "embarazo_id", "fecha_inicio")) %>%
+
+  # Rellenamos valores NA
+  mutate(
+    prev_aborto = ifelse(is.na(prev_aborto), 0, prev_aborto),
+    origen_prev_aborto = ifelse(is.na(origen_prev_aborto), NA, origen_prev_aborto)
+  )
+```
+CÓDIGOS ABORTO: 
+```{r}
+codigos_exacto <- c("N996", "O02.1", "632")
+
+codigos_prefijo <- c("O26.2", "O03", "634")
+```
+
+
+abortos anteriores en la base CMBD: 
+```{r}
+ruta_base <- 'E:/EMBARAZO/PREGVAL/1-DATOS/3-PROCESADOS/04_MBDS/'
+
+archivos <- paste0(ruta_base, "year_fecha_alta=", 2009:2021, "/part-0.parquet")
+mbds_parquet <- archivos |>
+  lapply(read_parquet) |> 
+  bind_rows() 
+
+mbds_parquet = mbds_parquet  %>% mutate(fecha_fin = if_else(!is.na(fecha_parto), fecha_parto, fecha_alta)) 
+
+```
+```{r}
+abortos_previos_mbds <- mbds_parquet %>%
+  filter(if_any(d1:d30, ~ 
+    .x %in% codigos_exacto | 
+    str_detect(.x, paste0("^(", paste0(codigos_prefijo, collapse = "|"), ")"))
+  )) %>% select(sip, fecha_fin)
+
+pregnancies_cohort_hiper <- pregnancies_cohort_hiper %>%
+  # Unimos con los abortos de MBDS
+  left_join(abortos_previos_mbds, by = "sip") %>%  
+  mutate(prev_aborto_flag_mbds = ifelse(!is.na(fecha_fin) & fecha_fin < fecha_inicio, 1, 0)) %>%
+
+  # Agrupamos por embarazo para detectar si alguno tiene aborto previo en MBDS
+  group_by(sip, embarazo_id, fecha_inicio) %>%
+  summarise(prev_aborto_mbds = max(prev_aborto_flag_mbds, na.rm = TRUE), .groups = "drop") %>%
+
+  # Creamos la variable de origen solo si se detectó aborto previo en MBDS
+  mutate(origen_prev_aborto_mbds = ifelse(prev_aborto_mbds == 1, "MBDS", NA)) %>%
+
+  # Unimos con la tabla original para mantener todas las filas
+  right_join(pregnancies_cohort_hiper, by = c("sip", "embarazo_id", "fecha_inicio")) %>%
+
+  # Actualizamos prev_aborto sumando posibles valores previos
+  mutate(
+    prev_aborto = ifelse(is.na(prev_aborto), 0, prev_aborto),
+    prev_aborto = ifelse(prev_aborto_mbds == 1 | prev_aborto == 1, 1, 0),
+    
+    # Unimos el origen nuevo sin sobrescribir
+    origen_prev_aborto = case_when(
+      !is.na(origen_prev_aborto) & !is.na(origen_prev_aborto_mbds) ~ paste(origen_prev_aborto, "MBDS", sep = ", "),
+      is.na(origen_prev_aborto) & !is.na(origen_prev_aborto_mbds)  ~ "MBDS",
+      TRUE ~ origen_prev_aborto
+    )
+  ) %>%
+
+  # Eliminamos columnas auxiliares
+  select(-prev_aborto_mbds, -origen_prev_aborto_mbds)
+```
+
+abortos anteriores en la base EOS
+```{r}
+#eos <- fread(file.path(procesados, "eos.csv"))
+
+ruta_base <- 'E:/EMBARAZO/PREGVAL/1-DATOS/3-PROCESADOS/11_EOS/'
+
+archivos <- paste0(ruta_base, "year_fecha_fin_emb=", 2009:2021, "/part-0.parquet")
+eos_parquet <- archivos |>
+  lapply(read_parquet) |>  # Leer cada archivo
+  bind_rows() 
+eos_parquet = eos_parquet %>% rename(fecha_fin=fecha_fin_emb) 
+```
+
+```{r}
+abortos_previos_eos <- eos_parquet %>%
+  filter(resultado_rn1=='spontaneous abortion' | resultado_rn2=='spontaneous abortion' | resultado_rn3=='spontaneous abortion') %>% select(sip, fecha_fin)
+
+pregnancies_cohort_hiper <- pregnancies_cohort_hiper %>%
+  # Unimos con los abortos de eos
+  left_join(abortos_previos_eos, by = "sip") %>%  
+  mutate(prev_aborto_flag_eos = ifelse(!is.na(fecha_fin) & fecha_fin < fecha_inicio, 1, 0)) %>%
+
+  # Agrupamos por embarazo para detectar si alguno tiene aborto previo en eos
+  group_by(sip, embarazo_id, fecha_inicio) %>%
+  summarise(prev_aborto_eos = max(prev_aborto_flag_eos, na.rm = TRUE), .groups = "drop") %>%
+
+  # Creamos la variable de origen solo si se detectó aborto previo en eos
+  mutate(origen_prev_aborto_eos = ifelse(prev_aborto_eos == 1, "EOS", NA)) %>%
+
+  # Unimos con la tabla original para mantener todas las filas
+  right_join(pregnancies_cohort_hiper, by = c("sip", "embarazo_id", "fecha_inicio")) %>%
+
+  # Actualizamos prev_aborto sumando posibles valores previos
+  mutate(
+    prev_aborto = ifelse(is.na(prev_aborto), 0, prev_aborto),
+    prev_aborto = ifelse(prev_aborto_eos == 1 | prev_aborto == 1, 1, 0),
+    
+    # Unimos el origen nuevo sin sobrescribir
+    origen_prev_aborto = case_when(
+      !is.na(origen_prev_aborto) & !is.na(origen_prev_aborto_eos) ~ paste(origen_prev_aborto, "EOS", sep = ", "),
+      is.na(origen_prev_aborto) & !is.na(origen_prev_aborto_eos)  ~ "EOS",
+      TRUE ~ origen_prev_aborto
+    )
+  ) %>%
+
+  # Eliminamos columnas auxiliares
+  select(-prev_aborto_eos, -origen_prev_aborto_eos)
+```
+
+abortos anteriores en la base de AED: 
+AED
+```{r}
+#aed <- fread(file.path(procesados, "aed.csv"))
+
+ruta_base <- 'E:/EMBARAZO/PREGVAL/1-DATOS/3-PROCESADOS/05_AED/'
+
+archivos <- paste0(ruta_base, "year_fecha_registro=", 2009:2021, "/part-0.parquet")
+aed_parquet <- archivos |>
+  lapply(read_parquet) |>  # Leer cada archivo
+  bind_rows() 
+
+aed_parquet = aed_parquet %>% rename(fecha_fin=fecha_alta) 
+```
+```{r}
+abortos_previos_aed <- aed_parquet %>%
+  filter(if_any(c(diag_cod, diag2_cod),  ~ 
+    .x %in% codigos_exacto | 
+    str_detect(.x, paste0("^(", paste0(codigos_prefijo, collapse = "|"), ")"))
+  ))  %>% select(sip, fecha_fin)
+
+pregnancies_cohort_hiper <- pregnancies_cohort_hiper %>%
+  # Unimos con los abortos de aed
+  left_join(abortos_previos_aed, by = "sip") %>%  
+  mutate(prev_aborto_flag_aed = ifelse(!is.na(fecha_fin) & fecha_fin < fecha_inicio, 1, 0)) %>%
+
+  # Agrupamos por embarazo para detectar si alguno tiene aborto previo en aed
+  group_by(sip, embarazo_id, fecha_inicio) %>%
+  summarise(prev_aborto_aed = max(prev_aborto_flag_aed, na.rm = TRUE), .groups = "drop") %>%
+
+  # Creamos la variable de origen solo si se detectó aborto previo en aed
+  mutate(origen_prev_aborto_aed = ifelse(prev_aborto_aed == 1, "AED", NA)) %>%
+
+  # Unimos con la tabla original para mantener todas las filas
+  right_join(pregnancies_cohort_hiper, by = c("sip", "embarazo_id", "fecha_inicio")) %>%
+
+  # Actualizamos prev_aborto sumando posibles valores previos
+  mutate(
+    prev_aborto = ifelse(is.na(prev_aborto), 0, prev_aborto),
+    prev_aborto = ifelse(prev_aborto_aed == 1 | prev_aborto == 1, 1, 0),
+    
+    # Unimos el origen nuevo sin sobrescribir
+    origen_prev_aborto = case_when(
+      !is.na(origen_prev_aborto) & !is.na(origen_prev_aborto_aed) ~ paste(origen_prev_aborto, "AED", sep = ", "),
+      is.na(origen_prev_aborto) & !is.na(origen_prev_aborto_aed)  ~ "AED",
+      TRUE ~ origen_prev_aborto
+    )
+  ) %>%
+
+  # Eliminamos columnas auxiliares
+  select(-prev_aborto_aed, -origen_prev_aborto_aed)
+```
+```{r}
+write.csv(pregnancies_cohort_hiper, "E:/VID/V1/2-SCRIPTS/Jezabel/pregnancies_cohort_hiper_aborto_prev.csv", row.names = FALSE)
+```
+

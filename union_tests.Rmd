@@ -1,0 +1,274 @@
+---
+title: "union_tests"
+output: html_document
+date: "2025-05-12"
+---
+
+```{r, include=FALSE}
+# Configurar las opciones globalmente para todo el documento
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+```
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(plotly)
+library(kableExtra)
+library(haven)
+library(reactable)
+library(grid)
+library(gridExtra)
+library(patchwork)
+library(paletteer)
+library(haven)
+library(tidyr)
+library(DT)
+library(crosstalk)
+library(lubridate) 
+library(data.table)
+library(arrow)
+library(scales)
+library(forcats)
+library(stringr)
+library(purrr)
+library(ggrepel)
+library(gt)
+
+c <- c(
+  "#cce7df",  
+  "#93a29e",
+  "#b7ded2",  
+  "#a4c7bd",  
+  "#92b1a8",  
+  "#809b93",
+  "#bfb5b2" ,
+  "#6d857e",  
+  "#5b6f69",  
+  "#495854" ,"#bfb5b2" ,"#cce7df","#92b1a8","#495854" , "#a4c7bd")
+
+
+```
+
+cargamos de lo que tenemos guardado:
+```{r}
+pregnancies_cohort <- readRDS("E:/EMBARAZO/PREGVAL/1-DATOS/3-PROCESADOS/pregnancy_algorithm/pregnancies_cohort_table_6m_lookback.RDS") |> 
+  # obtain pregnancies from 01-07-2009
+  tidylog::filter(fecha_inicio >= ymd("2009-07-01")) |>
+  distinct()
+
+
+gaia_embarazos_disp=read.csv("E:/VID/V1/2-SCRIPTS/Jezabel/intermedio.csv") #ya tiene filtrado las recetas para los periodos solo y añadidos los atc_cod
+gaia_embarazos_disp= gaia_embarazos_disp%>%
+  filter(!(via_desc == "OTRAS VIAS" & atc_cod != "N02AB"))
+
+
+pregnancies_cohort=pregnancies_cohort%>%rename(embarazo_id=pregnancy_id)
+
+diferencia <- setdiff(pregnancies_cohort$embarazo_id, gaia_embarazos_disp$embarazo_id)
+
+pregnancies_cohort_not_match <- pregnancies_cohort %>%
+  filter(embarazo_id %in% diferencia)
+
+gaia_embarazos_disp$fecha_inicio <- as.POSIXct(gaia_embarazos_disp$fecha_inicio, format = "%Y-%m-%d", tz = "UTC")
+gaia_embarazos_disp$fecha_fin <- as.POSIXct(gaia_embarazos_disp$fecha_fin, format = "%Y-%m-%d", tz = "UTC")
+
+pregnancies_cohort_not_match$duration <- as.difftime(pregnancies_cohort_not_match$duration, units = "days")
+gaia_embarazos_disp$duration <- as.difftime(gaia_embarazos_disp$duration, units = "days")
+
+pregnancies_cohort_not_match$value <- as.character(pregnancies_cohort_not_match$value)
+
+gaia_embarazos_disp$fecha_calculo <- as.Date(gaia_embarazos_disp$fecha_calculo)
+pregnancies_cohort_not_match$fecha_calculo <- as.Date(pregnancies_cohort_not_match$fecha_calculo)
+gaia_embarazos_disp$fecha_nacimiento <- as.Date(gaia_embarazos_disp$fecha_calculo)
+pregnancies_cohort_not_match$fecha_nacimiento <- as.Date(pregnancies_cohort_not_match$fecha_calculo)
+
+gaia_embarazos_disp$exclusion_risk_0 <- as.character(gaia_embarazos_disp$exclusion_risk_0)
+
+gaia_embarazos_comp <- bind_rows(gaia_embarazos_disp, pregnancies_cohort_not_match) #por si queremos unir la infor a todos
+
+gaia_embarazos_hiper_comp = gaia_embarazos_comp %>% filter(m_hypertension==1) #(por si quisiéramos unir infor solo  a hipertensos)
+
+```
+
+# Tensión IMC
+
+### tensión
+```{r}
+tension = fread(file.path(procesados, "tension.csv"))
+
+emb_ten = pregnancies_cohort %>% tidylog::left_join(tension, by=c('sip')) # no filtramos por year proq puede empezar el embarazo en diciembre y la #tensión ser tomada en enero del año siguiente
+emb_ten = emb_ten  %>% filter(fecha_inicio <= fecha & fecha < pmin(fecha_fin, fecha_inicio + days(97))) #aquí si que comprobamos que la fecha de le tensión esté dentro del embarazo (entre el inicio y el primer periodo)
+
+```
+Crear variables binarias:
+
+```{r}
+
+id_hipertension_post <- emb_ten %>%
+  group_by(embarazo_id) %>%
+  summarise(
+    fecha_inicio = first(fecha_inicio),  
+    hipertension_post = as.integer(
+      any(((descripcion == "Tensión arterial diastólica" & valor >= 90) |
+          (descripcion == "Tensión Arterial Sistólica" & valor >= 140)) & fecha>=fecha_inicio )
+    )
+  )
+```
+
+
+añadimos la tensión a los embarazos
+```{r}
+emb_ten <- emb_ten %>%
+  left_join(select(id_hipertension_post, embarazo_id, hipertension_post), by = "embarazo_id")
+num = emb_ten %>% distinct(embarazo_id)
+```
+
+```{r}
+hipertensos_emb = emb_ten %>% filter(m_hypertension==1)
+num = hipertensos_emb %>% distinct(embarazo_id)
+#8.164 embarazos de los 10127 hipertensos tienen medidas dentro del primer periodo o 3 meses antes
+#1.387 embarazos de los 10127 hipertensos tienen medidas pre y post (dentro del primer periodo y 3 meses antes)
+#7.917 embarazos de los 10127 hipertensos tienen medidas post (dentro del primer periodo) ESTOS SON LOS QUE UTILIZAMOS
+
+```
+
+Finalmente unimos a GAIA la tensión, pero guardamos solo hipertensas
+```{r}
+emb_ten_reducido <- emb_ten %>%
+  select(embarazo_id, hipertension_post) 
+emb_ten_reducido_unico <- emb_ten_reducido %>%
+  distinct(embarazo_id, .keep_all = TRUE)
+
+
+gaia_embarazos_disp_tension <- gaia_embarazos_comp %>%
+  left_join(emb_ten_reducido_unico, by = "embarazo_id")
+
+gaia_embarazos_disp_ten_hiper = gaia_embarazos_disp_tension %>% filter(m_hypertension==1)
+write.csv(gaia_embarazos_disp_ten_hiper, "E:/VID/V1/2-SCRIPTS/Jezabel/gaia_embarazos_disp_ten_hiper.csv", row.names = FALSE)
+```
+
+
+ 
+### IMC
+
+```{r}
+procesados  <- file.path( "E:",'EMBARAZO', "PREGVAL", "1-DATOS", 
+                          "3-PROCESADOS")
+imc = fread(file.path(procesados, "imc.csv"))
+
+imc= imc %>% rename(year=year_fecha)
+```
+
+
+
+
+```{r}
+emb_imc = pregnancies_cohort %>% tidylog::left_join(imc, by=c('sip'))
+
+#mirar 6 meses antes tb
+
+
+hipertensos_imc = emb_imc %>% filter(m_hypertension==1)
+
+id_imc = hipertensos_imc %>% filter(descripcion=='Índice de Masa Corporal') 
+
+emb_imc <- id_imc %>% 
+  filter((fecha_inicio %m-% months(6)) < fecha & 
+         fecha < pmin(fecha_fin, fecha_inicio + days(97)))
+
+
+summary(emb_imc$valor)
+```
+
+```{r}
+#Al final no se van a recuperar IMC, ya que los que tenían peso pero no talla en ese momento, la mayoría era porqué se había apuntado la talla como peso #y lo que generaba IMC con valores que no eran reales.
+
+```
+
+```{r}
+nums = hipertensos_imc %>% filter(descripcion=='Índice de Masa Corporal') %>% distinct(embarazo_id) #9395 (antes había 9.372)
+
+
+
+#esto porq en el futuro solo querremos imputar las que estén dentro del periodo: 
+emb_imc <- hipertensos_imc %>% 
+  filter((fecha_inicio %m-% months(6)) < fecha & 
+         fecha < pmin(fecha_fin, fecha_inicio + days(97))) %>% 
+  filter(descripcion == 'Índice de Masa Corporal') 
+
+
+# y esto porq, además, nos quedamos con la que más cerca esté de la fecha de inicio: 
+emb_imc <- emb_imc %>%
+  mutate(distancia_dias = abs(as.numeric(difftime(fecha, fecha_inicio, units = "days")))) %>%
+  group_by(embarazo_id) %>%
+  slice_min(distancia_dias, with_ties = FALSE) %>%
+  ungroup()
+
+id_imc = emb_imc %>% distinct(embarazo_id) 
+#6955 embarazos cn IMC dentro del periodo indicado 
+
+emb_imc = emb_imc %>% rename(value_imc=valor)
+
+summary(emb_imc$value_imc)
+```
+
+
+Base de embarazos hipertensos con el IMC:
+```{r}
+#unir id e valor_imc
+emb_imc_reducido <- emb_imc %>%
+  select(embarazo_id, value_imc) 
+
+pregnancies_cohort_hiper = pregnancies_cohort %>% filter(m_hypertension==1)
+pregnancies_cohort_hiper_imc <- pregnancies_cohort_hiper %>%
+  left_join(emb_imc_reducido, by = "embarazo_id")
+summary(pregnancies_cohort_hiper_imc$value_imc)
+```
+
+Ahora tenemos los 10127 embarazos hipertensos con 2.305 faltantes (7822 de antes que sí)
+Si quisiéramos imputar:
+```{r}
+library(VIM)
+library(DMwR2)
+
+# Seleccionar variables predictoras y la variable a imputar
+datos_hiper <- pregnancies_cohort_hiper_imc %>% 
+  select(embarazo_id, value_imc, m_smoking, m_alcohol, m_sedentary, m_drug_abuse, 
+         m_chf, m_lipid, m_diabetes, m_depression, m_anxiety, m_psychotic, 
+         m_obesity, m_asthma, m_epilepsy, age)
+
+# Preparar las variables (factor y escala)
+datos_hiper_preparados <- datos_hiper %>%
+  mutate(across(starts_with("m_"), as.factor)) %>%
+  mutate(across(age, scale))
+
+# Imputar value_imc usando kNN (euclídea, porque todas las variables están estandarizadas)
+datos_hiper_imputados <- VIM::kNN(
+  datos_hiper_preparados,
+  variable = "value_imc",
+  k = 10,
+  imp_var = FALSE
+)
+
+# Ver resumen tras imputación
+summary(datos_hiper_imputados$value_imc)
+```
+
+
+```{r}
+pregnancies_cohort_hiper_imc <- datos_hiper_imputados %>%
+  mutate(imputado = ifelse(is.na(datos_hiper_preparados$value_imc), 1, 0))
+
+```
+
+```{r}
+pregnancies_cohort_hiper_imc <- pregnancies_cohort_hiper_imc %>%
+  mutate(obesity_final = case_when(
+    imputado == 0 & (m_obesity == 1 | value_imc > 30) ~ 1,
+    TRUE ~ 0
+  )) 
+
+write.csv(pregnancies_cohort_hiper_imc, "E:/VID/V1/2-SCRIPTS/Jezabel/pregnancies_cohort_hiper_imc.csv", row.names = FALSE)
+```
+
+
